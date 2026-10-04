@@ -194,7 +194,7 @@ Everything is tested end to end in a throwaway project (not part of any game), w
 - `Source/GameplayMCPToolset/Private/Tests/GameplayConsoleFilterTest.cpp` is an automation test (`GameplayMCPToolset.ConsoleFilter`) that checks the console command filter as a pure function against a table of cases. Nothing is executed. Run it headless: `UnrealEditor-Cmd.exe <Project>.uproject -ExecCmds="Automation RunTests GameplayMCPToolset.ConsoleFilter" -TestExit="Automation Test Queue Empty" -unattended -nullrhi`.
 - `Tests/mcp_bridge_test.py` (plain Python 3) talks to the **real Unreal MCP HTTP server** while the editor test is paused in PIE (`GMCP_MCP_BRIDGE=1`): `initialize`, `tools/list`, `list_toolsets`, `describe_toolset` and `call_tool` for PIE, input, console and screenshot tools, the error envelope, and the dotted-name failure.
 
-**Results for 0.1.1** (UE 5.8.3, Win64): `RunUAT BuildPlugin` compiles with 0 errors and 0 warnings. The console filter table test passes (60 cases, and a deliberately broken expectation makes it fail). 299 checks with 0 failures in the editor test, and 16 with 0 failures over MCP HTTP. Highlights of what is checked against real game state rather than just tool output:
+**Results for 0.1.2** (UE 5.8.3, Win64): `RunUAT BuildPlugin` compiles with 0 errors and 0 warnings, and so does the test project in both build modes: full unity (`-ForceUnity -DisableAdaptiveUnity`, how a project compiles an unmodified submodule) and non-unity (`-DisableUnity`, every file on its own). The console filter table test passes (60 cases, and a deliberately broken expectation makes it fail). 299 checks with 0 failures in the editor test, and 16 with 0 failures over MCP HTTP. Highlights of what is checked against real game state rather than just tool output:
 
 - Holding `IA_Move` moves the pawn and switches the anim Blueprint from Idle to Walk while held, then back to Idle.
 - Taps produce exactly N `Started`/`Completed` events in game, and an axis ramp delivers mid values.
@@ -231,6 +231,9 @@ These could not be covered by the scripted run and have only been reasoned about
 - **Running the test while another editor of the same engine has Live Coding active**: UnrealBuildTool refuses to build any editor target of that engine install. Build the test project with `-NoHotReloadFromIDE` only if that other editor does not load the binaries you are building.
 
 ## Changelog
+
+**0.1.2**
+- Fix: the plugin failed to compile in projects that build it as a single unity file (e.g. as an unmodified git submodule): two files defined the same constant in an anonymous namespace. Every release is now also built with `-ForceUnity -DisableAdaptiveUnity` and with `-DisableUnity`.
 
 **0.1.1**
 - `editor_run_console_command` no longer runs anything inside the tool call: it queues a job that runs on a later frame with a scoped log capture; new `editor_get_command_result` reports output, captured log, and whether the PIE/editor world changed. Queued jobs are cancelled cleanly when PIE ends or the module shuts down.

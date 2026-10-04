@@ -14,7 +14,7 @@
 namespace
 {
 	/** Jobs that have finished are kept this long so their status can still be read. */
-	constexpr int32 MaxRetainedJobs = 50;
+	constexpr int32 MaxRetainedInputJobs = 50;
 
 	UEnhancedInputLocalPlayerSubsystem* GetInputSubsystem(UWorld* World, int32 PlayerIndex)
 	{
@@ -156,7 +156,7 @@ int32 FGameplayInputJobs::StartJob(int32 PlayerIndex, TArray<FStep>&& Steps, FSt
 	{
 		Finished += IsActive(Existing) ? 0 : 1;
 	}
-	for (int32 Index = 0; Index < Jobs.Num() && Finished > MaxRetainedJobs; )
+	for (int32 Index = 0; Index < Jobs.Num() && Finished > MaxRetainedInputJobs; )
 	{
 		if (!IsActive(Jobs[Index]))
 		{

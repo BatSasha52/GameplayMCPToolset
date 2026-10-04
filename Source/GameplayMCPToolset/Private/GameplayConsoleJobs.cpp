@@ -17,7 +17,7 @@ namespace
 {
 	/** Frames between queueing and running, so the tool call that queued the job has fully returned. */
 	constexpr uint64 FramesBeforeRun = 2;
-	constexpr int32 MaxRetainedJobs = 50;
+	constexpr int32 MaxRetainedConsoleJobs = 50;
 	constexpr int32 MaxCapturedLines = 2000;
 }
 
@@ -75,7 +75,7 @@ int32 FGameplayConsoleJobs::Enqueue(const FString& Command, const TArray<FString
 	Job.Target = Target;
 	Job.QueuedFrame = GFrameCounter;
 
-	for (int32 Index = 0; Jobs.Num() > MaxRetainedJobs && Index < Jobs.Num(); )
+	for (int32 Index = 0; Jobs.Num() > MaxRetainedConsoleJobs && Index < Jobs.Num(); )
 	{
 		if (Jobs[Index].State == TEXT("done") || Jobs[Index].State == TEXT("cancelled"))
 		{
