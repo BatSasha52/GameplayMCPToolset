@@ -1,6 +1,6 @@
 # GameplayMCPToolset
 
-An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, read animation state, drive Enhanced Input like a player would, run console commands, read the output log, trigger Live Coding, and edit Blueprint components.
+An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, read animation state, drive Enhanced Input like a player would, run console commands, read the output log, trigger Live Coding, edit Blueprint components, and capture the game view.
 
 It works with any project. Nothing in it is tied to a specific game, character or asset.
 
@@ -135,6 +135,15 @@ Every change is one undoable transaction (`FScopedTransaction` + `Modify()`), th
 | `bp_reparent_component(blueprint_path, name, new_parent)` | Attach an `added` scene component to another scene component (added, inherited or native), keeping its relative transform. Refuses the scene root, cycles and non-scene components. |
 | `bp_save_asset(blueprint_path)` | Save the asset. The only tool in this plugin that writes asset files. |
 
+### Phase 5 — Game viewport screenshot (`GameplayViewportToolset`)
+
+| Tool | Purpose |
+|---|---|
+| `game_capture_screenshot(width=1280, height=720, file_name="auto", overwrite=false)` | Capture the PIE game view at the requested resolution and return a `job_id` at once. The PNG goes to `<Project>/Saved/Screenshots/GameplayMCP/<file_name>.png`; the result carries the absolute `file_path` and resolution, never the image data. |
+| `game_screenshot_status(job_id="latest")` | `pending` / `completed` / `failed`, file path, size in pixels and bytes. |
+
+It uses the engine's high-res screenshot path (`GScreenshotResolutionX/Y` + `FViewport::TakeHighResScreenShot()`): on the next frame the PIE game viewport client renders into an offscreen viewport of that size and hands the pixels to `UGameViewportClient::OnScreenshotCaptured`, which this plugin writes as PNG. There is no editor UI in the image. Slate widgets (including UMG) are not captured either; HUD canvas drawing is. The camera's field of view is kept, so a different aspect ratio than the viewport shows more or less of the scene. File names may only use letters, digits, `_`, `-` and `.`; existing files are not replaced unless `overwrite=true`.
+
 ## Calling tools through Unreal MCP
 
 With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees three meta-tools: `list_toolsets`, `describe_toolset` and `call_tool`. Call a tool like this:
@@ -158,6 +167,61 @@ With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees thr
 
 **Phase 4 — Blueprint components**
 > In `/Game/Blueprints/BP_Door`, add a `BoxComponent` called `OpenTrigger` under `DoorFrame` and a `PointLight` called `Lamp` under the scene root, rename `StaticMesh1` to `Panel`, then list the components and save the Blueprint.
+
+**Phase 5 — Game viewport screenshot**
+> Start PIE, hold `IA_Move` forward for one second, then take a 1920x1080 screenshot of the game view called `after_move` and tell me where the file is.
+
+**All together**
+> Implement the double-jump I described, live-compile, start PIE, double-tap `IA_Jump`, and verify with `pie_get_property` that `JumpCurrentCount` reached 2 and with `pie_get_anim_state` that the anim Blueprint entered `DoubleJump`. Attach a screenshot of the apex and stop PIE.
+
+## Testing
+
+Everything is tested end to end in a throwaway project (not part of any game), with the plugin loaded in a real editor:
+
+- `Tests/TestProject/` is a minimal C++ project: a game mode and a trivial character (`AGMCPTestCharacter`) with Enhanced Input bindings that record what they receive, nested struct/array/map/object properties, and a couple of `BlueprintCallable` functions. Its `Target.cs`/`Build.cs` files are stored as `*.cs.in`, because UnrealBuildTool scans every `*.cs` file under a plugin folder and real ones would break the projects that use this plugin.
+- `Tests/setup_test_project.ps1` materialises that project (default `%TEMP%\GMCPTest`) with this plugin linked in as a junction. If the sibling AnimMCPToolset plugin is available it is linked too, and the test uses it **only** to build a fixture Animation Blueprint with an Idle/Walk state machine. GameplayMCPToolset does not depend on it.
+- `Tests/gameplay_smoke_test.py` runs inside the editor (`UnrealEditor.exe GMCPTest.uproject -ExecutePythonScript=<plugin>/Tests/gameplay_smoke_test.py -unattended -nosplash -windowed`). It creates fixtures (input actions, montage, level, Blueprints), starts PIE with `pie_start`, steps through every tool on Slate ticks so the game keeps running between calls, stops PIE, runs the editor-only checks and quits. Every call goes through the Toolset Registry, the same entry point Unreal MCP uses. Results go to `<Project>/Saved/gmcp_smoke.txt`.
+- `Tests/mcp_bridge_test.py` (plain Python 3) talks to the **real Unreal MCP HTTP server** while the editor test is paused in PIE (`GMCP_MCP_BRIDGE=1`): `initialize`, `tools/list`, `list_toolsets`, `describe_toolset` and `call_tool` for PIE, input, console and screenshot tools, the error envelope, and the dotted-name failure.
+
+**Results for 0.1.0** (UE 5.8.3, Win64): `RunUAT BuildPlugin` compiles with 0 errors and 0 warnings. 269 checks with 0 failures in the editor test, and 14 with 0 failures over MCP HTTP. Highlights of what is checked against real game state rather than just tool output:
+
+- Holding `IA_Move` moves the pawn and switches the anim Blueprint from Idle to Walk while held, then back to Idle.
+- Taps produce exactly N `Started`/`Completed` events in game, and an axis ramp delivers mid values.
+- Cancelling a job, or PIE ending mid-hold, releases the action (the game sees `Completed`).
+- `slomo` through the console tool changes the PIE world's time dilation.
+- A deliberately broken source file makes Live Coding report `failure` with the compiler error (`file(line,col): error C2059`); after the file is restored it compiles cleanly.
+- Blueprint edits compile, mark dirty without saving, and `TRANSACTION UNDO` reverts them.
+- Screenshots have the requested pixel size and no editor UI.
+
+### Not tested
+
+These could not be covered by the scripted run and have only been reasoned about against the 5.8.3 sources:
+
+- A real MCP client application (Claude Code, Cursor…). The bridge test speaks MCP JSON-RPC over HTTP itself.
+- Multiplayer PIE (several clients, listen/dedicated server) and `player_index` > 0 actually driving a second local player. The PIE tools act on the first PIE instance.
+- Simulate-In-Editor sessions.
+- Input actions with their own triggers and modifiers (e.g. a Hold trigger) and `axis3d` actions. The fixtures use plain boolean/1D/2D actions.
+- `pie_call_function` refusing a latent function (the fixture has none); RPCs.
+- HDR viewports (the `OnHDRScreenshotCaptured` conversion path), and the screenshot timeout when the editor window is minimized.
+- Live Coding when it is disabled or unavailable, and the UBT log location of source-built engines.
+- Undo of rename, reparent and remove (undo is checked for add). Blueprint component classes from `/Game` as `component_class`, child actor components, and sockets.
+- Platforms other than Win64.
+
+## Limitations and notes
+
+- **Experimental engine APIs.** Toolset Registry and Unreal MCP are experimental in UE 5.8.3 and may change.
+- **First PIE instance only.** With several PIE clients, the PIE tools see the first instance (`GetPIEWorldContext(0)`).
+- **Raw property writes.** `pie_set_property` writes memory directly: no setters, `OnRep`, `PostEditChangeProperty` or construction script reruns. Use `pie_call_function` for setters. Fixed-size C arrays are read-only. Sets are not supported in paths.
+- **Input timing is game time**, so a hold lasts longer while the game is paused or slowed down. A job is limited to 300 game seconds. While PIE is paused, input jobs keep waiting.
+- **Console output.** Many commands print to the log rather than the output device; both are returned. Some take effect only on the next frame.
+- **Log tail** only holds lines logged after the plugin module loaded (it is a `PostEngineInit` module), up to the last 10000.
+- **Screenshots** use the engine's shared screenshot delegate for one frame; another screenshot taken at that exact moment by something else would be routed here. Only one capture runs at a time.
+- **Live Coding** needs a Win64 editor with Live Coding enabled and a C++ project. Diagnostics come from UnrealBuildTool's log, which Epic's own LiveCodingToolset in 5.8.3 reads from `Engine/Programs`, the wrong place for installed engines. This plugin reads `%LOCALAPPDATA%/UnrealBuildTool/Log.txt` for installed engines, as UBT itself does.
+- **Running the test while another editor of the same engine has Live Coding active**: UnrealBuildTool refuses to build any editor target of that engine install. Build the test project with `-NoHotReloadFromIDE` only if that other editor does not load the binaries you are building.
+
+## Changelog
+
+**0.1.0** — first release: play-mode inspector, Enhanced Input simulation, console/log/Live Coding, Blueprint component tools, game viewport screenshots.
 
 ## License
 

@@ -9,6 +9,7 @@
 #include "GameplayInputToolset.h"
 #include "GameplayLogCapture.h"
 #include "GameplayPIEToolset.h"
+#include "GameplayViewportToolset.h"
 
 /**
  * Toolsets are not discovered automatically: each UToolsetDefinition subclass must be
@@ -25,12 +26,14 @@ public:
 		UToolsetRegistry::RegisterToolsetClass(UGameplayInputToolset::StaticClass());
 		UToolsetRegistry::RegisterToolsetClass(UGameplayEditorToolset::StaticClass());
 		UToolsetRegistry::RegisterToolsetClass(UGameplayBlueprintToolset::StaticClass());
+		UToolsetRegistry::RegisterToolsetClass(UGameplayViewportToolset::StaticClass());
 	}
 
 	virtual void ShutdownModule() override
 	{
 		// Tickers, delegates and the log device are released even late in engine shutdown, so nothing
 		// of this module is left registered (or holding memory) when static destructors run.
+		GameplayScreenshots::Shutdown();
 		GameplayLiveCoding::Shutdown();
 		FGameplayInputJobs::Get().Shutdown();
 		FGameplayLogCapture::Get().Shutdown();
@@ -38,6 +41,7 @@ public:
 		{
 			return;
 		}
+		UToolsetRegistry::UnregisterToolsetClass(UGameplayViewportToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayBlueprintToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayEditorToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayInputToolset::StaticClass());

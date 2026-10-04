@@ -623,6 +623,56 @@ def test_phase4():
         call(BPT, "bp_save_asset", blueprint_path=path)
 
 
+# ---- phase 5: game viewport screenshot --------------------------------------------------------
+
+VP = "GameplayViewportToolset"
+
+
+def png_size(path):
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def test_phase5_before_pie():
+    if not has_toolset(VP):
+        skip("phase 5 (GameplayViewportToolset not registered)")
+        return
+    expect_fail(VP, "game_screenshot_status", contains="No screenshot has been requested")
+    expect_fail(VP, "game_capture_screenshot", contains="No Play-In-Editor session")
+
+
+def capture(width, height, name):
+    r = ok(VP, "game_capture_screenshot", width=width, height=height, file_name=name, overwrite=True)
+    if not r:
+        return None
+    yield from wait_until(lambda: (call(VP, "game_screenshot_status", job_id=str(r["job_id"])).get("result") or {}).get("state") in ("completed", "failed"), 30, "screenshot %s" % name)
+    return call(VP, "game_screenshot_status", job_id=str(r["job_id"])).get("result")
+
+
+def test_phase5_in_pie():
+    if not has_toolset(VP):
+        return
+    expect_fail(VP, "game_capture_screenshot", contains="between 64", width=10, height=720)
+    expect_fail(VP, "game_capture_screenshot", contains="may only contain", file_name="../evil")
+    st = yield from capture(1280, 720, "gmcp_view_1280x720")
+    check(st and st["state"] == "completed" and os.path.isabs(st["file_path"]) and os.path.exists(st["file_path"]), "screenshot written to an absolute path", st)
+    if st and os.path.exists(st["file_path"]):
+        check(png_size(st["file_path"]) == (1280, 720) and st["file_size"] > 20000, "PNG has the requested size and real content", (png_size(st["file_path"]), st["file_size"]))
+        check("Saved" in st["file_path"] and "GameplayMCP" in st["file_path"], "written under Saved/Screenshots/GameplayMCP", st["file_path"])
+    st = yield from capture(640, 640, "gmcp_view_square")
+    check(st and st["state"] == "completed" and png_size(st["file_path"]) == (640, 640), "non-viewport aspect ratio", st)
+    expect_fail(VP, "game_capture_screenshot", contains="already exists", file_name="gmcp_view_square")
+    r = ok(VP, "game_capture_screenshot", width=320, height=180)
+    expect_fail(VP, "game_capture_screenshot", contains="Another screenshot", width=320, height=180)
+    yield from wait_until(lambda: (call(VP, "game_screenshot_status").get("result") or {}).get("state") != "pending", 30, "auto-named screenshot")
+    st = ok(VP, "game_screenshot_status", job_id="latest")
+    check(st and st["state"] == "completed" and os.path.basename(st["file_path"]).startswith("Shot_"), "auto file name", st and st["file_path"])
+    expect_fail(VP, "game_screenshot_status", contains="No screenshot job", job_id="999")
+
+
 def bridge_wait():
     if os.environ.get("GMCP_MCP_BRIDGE") != "1":
         skip("MCP bridge test (set GMCP_MCP_BRIDGE=1 and run Tests/mcp_bridge_test.py)")
@@ -649,6 +699,7 @@ def sequence():
 
     test_phase1_before_pie()
     test_phase3_editor()
+    test_phase5_before_pie()
     ok("GameplayPIEToolset", "pie_start")
     if not (yield from wait_until(pie_running, 90, "PIE to start")):
         return
@@ -660,6 +711,7 @@ def sequence():
     test_montage()
     yield from test_phase2()
     test_phase3_pie()
+    yield from test_phase5_in_pie()
 
     yield from bridge_wait()
 

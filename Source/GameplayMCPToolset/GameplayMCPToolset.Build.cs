@@ -28,6 +28,7 @@ public class GameplayMCPToolset : ModuleRules
 				"AssetRegistry",
 				"EnhancedInput",
 				"LevelEditor",
+				"RHI",
 				"Slate",
 				"SlateCore",
 				"SubobjectDataInterface",
