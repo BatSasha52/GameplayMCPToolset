@@ -106,13 +106,20 @@ Every input tool **returns a `job_id` at once**; the job then runs on the editor
 
 | Tool | Purpose |
 |---|---|
-| `editor_run_console_command(command, target="auto")` | Run a console command and return its output plus every log line it produced. `auto` runs it through the PIE local player's controller when PIE is running (so cheats and game commands such as `slomo` work), otherwise in the editor. `pie` / `editor` force a target. Reports `recognized: false` for unknown commands. |
+| `editor_run_console_command(command, target="auto", allow_unsafe=false)` | Run a console command that passes the command filter (below) and return its output plus every log line it produced. `auto` runs it through the PIE local player's controller when PIE is running (so cheats and game commands such as `slomo` work), otherwise in the editor. `pie` / `editor` force a target. |
 | `editor_get_recent_log(max_lines=100, log_category="*", min_verbosity="log", contains="*", after_id=0)` | Tail of the output log with category (wildcards), verbosity and text filters. Pass the returned `latest_id` as `after_id` to read only new lines. Holds the last 10000 lines logged after the plugin loaded. |
 | `editor_live_coding_compile()` | Start a Live Coding compile (Ctrl+Alt+F11) **without blocking** and return a `job_id`. |
 | `editor_live_coding_status(job_id="latest")` | `compiling` / `completed`, result (`success`, `no_changes`, `failure`, `cancelled`, `unknown`), compiler `errors` and `warnings` with file and line, and the Live Coding output. |
 
-**Refused console commands.** The first word of every `|`-separated part is checked; these are always refused because they quit the editor or end PIE, crash on purpose, run arbitrary scripts or write packages:
-`quit`, `exit`, `disconnect`, `debug` (crash/assert/hang family), `crash`, `exec`, `py`, `python`, and `obj savepackage`. Use `pie_stop` to end PIE.
+**Console command filter.** Console commands are powerful: in 0.1.0 a made-up command, `QUIT_EDITOR_TYPO_CHECK`, closed the editor, because the engine's `FParse::Command` matches a command name whenever the next character is not a letter or digit (`_` and `.` end a match), so any word that *starts with* a real command runs it. 0.1.1 replaces the blocklist with an allowlist:
+
+- **Splitting.** The command is split on `|`, `;`, newlines and carriage returns, a superset of what the engine splits on. Every part is checked, and only the checked parts are run, one by one. Leading whitespace, quotes and control characters are stripped before checking.
+- **Allowed** (first word, exact): `stat`, `slomo`, `showdebug`, `show`, `viewmode`, `display`, `displayall`, `pause`, `freezerendering`, `god`, `fly`, `ghost`, `walk`, `toggledebugcamera`, `restartlevel`, `obj list`, `obj dump`, and reading or setting any registered **console variable** (`r.VSync`, `t.MaxFPS 60`, `p.…`). Each name was checked against the UE 5.8.3 source.
+- **Anything else** is refused with rule `allowlist_miss` unless you pass `allow_unsafe=true` (e.g. `transaction undo`).
+- **Hard deny** (rule `hard_deny`): refused **even with `allow_unsafe=true`**. Matched as **prefixes** of the first word, case-insensitively, like the engine matches them: `quit`, `exit`, `quit_editor`, `close_editor`, `close_slate_mainframe`, `debug` (crash/hang/assert/terminate family), `crash`, `gpf`, `fatal`, `terminate`, `abort`, `stackoverflow`, `shutdown`, `disconnect` (ends PIE), `exec` (runs a file of commands the filter never sees), `py`, `python`. Also any first word *containing* `quit`, `exit`, `crash`, `terminate` or `shutdown` (e.g. `csv.ExitOnCompletion`), and `obj savepackage`. Use `pie_stop` to end PIE.
+- Every refusal names the command, the segment and the rule that matched.
+
+> ⚠️ Even allowed commands can change editor or game state (`pause`, `slomo`, console variables, `restartlevel` reloads the PIE level). Prefer the dedicated tools where they exist.
 
 **Live Coding route.** `ILiveCodingModule::Compile(ELiveCodingCompileFlags::None, …)` returns at once with `InProgress` (the `WaitForCompletion` flag would block the game thread, so it is not used). The job watches `IsCompiling()` and the result line Live Coding logs when it finishes, then reads compiler diagnostics from UnrealBuildTool's log, which lives at `%LOCALAPPDATA%/UnrealBuildTool/Log.txt` for installed engines and `Engine/Programs/UnrealBuildTool/Log.txt` for source builds.
 
@@ -181,6 +188,7 @@ Everything is tested end to end in a throwaway project (not part of any game), w
 - `Tests/TestProject/` is a minimal C++ project: a game mode and a trivial character (`AGMCPTestCharacter`) with Enhanced Input bindings that record what they receive, nested struct/array/map/object properties, and a couple of `BlueprintCallable` functions. Its `Target.cs`/`Build.cs` files are stored as `*.cs.in`, because UnrealBuildTool scans every `*.cs` file under a plugin folder and real ones would break the projects that use this plugin.
 - `Tests/setup_test_project.ps1` materialises that project (default `%TEMP%\GMCPTest`) with this plugin linked in as a junction. If the sibling AnimMCPToolset plugin is available it is linked too, and the test uses it **only** to build a fixture Animation Blueprint with an Idle/Walk state machine. GameplayMCPToolset does not depend on it.
 - `Tests/gameplay_smoke_test.py` runs inside the editor (`UnrealEditor.exe GMCPTest.uproject -ExecutePythonScript=<plugin>/Tests/gameplay_smoke_test.py -unattended -nosplash -windowed`). It creates fixtures (input actions, montage, level, Blueprints), starts PIE with `pie_start`, steps through every tool on Slate ticks so the game keeps running between calls, stops PIE, runs the editor-only checks and quits. Every call goes through the Toolset Registry, the same entry point Unreal MCP uses. Results go to `<Project>/Saved/gmcp_smoke.txt`.
+- `Source/GameplayMCPToolset/Private/Tests/GameplayConsoleFilterTest.cpp` is an automation test (`GameplayMCPToolset.ConsoleFilter`) that checks the console command filter as a pure function against a table of cases. Nothing is executed. Run it headless: `UnrealEditor-Cmd.exe <Project>.uproject -ExecCmds="Automation RunTests GameplayMCPToolset.ConsoleFilter" -TestExit="Automation Test Queue Empty" -unattended -nullrhi`.
 - `Tests/mcp_bridge_test.py` (plain Python 3) talks to the **real Unreal MCP HTTP server** while the editor test is paused in PIE (`GMCP_MCP_BRIDGE=1`): `initialize`, `tools/list`, `list_toolsets`, `describe_toolset` and `call_tool` for PIE, input, console and screenshot tools, the error envelope, and the dotted-name failure.
 
 **Results for 0.1.0** (UE 5.8.3, Win64): `RunUAT BuildPlugin` compiles with 0 errors and 0 warnings. 269 checks with 0 failures in the editor test, and 14 with 0 failures over MCP HTTP. Highlights of what is checked against real game state rather than just tool output:
@@ -220,6 +228,9 @@ These could not be covered by the scripted run and have only been reasoned about
 - **Running the test while another editor of the same engine has Live Coding active**: UnrealBuildTool refuses to build any editor target of that engine install. Build the test project with `-NoHotReloadFromIDE` only if that other editor does not load the binaries you are building.
 
 ## Changelog
+
+**0.1.1**
+- `editor_run_console_command`: allowlist + `allow_unsafe` instead of a blocklist; hard-deny list matched as prefixes like the engine does (fixes `QUIT_EDITOR_TYPO_CHECK` closing the editor); chains split on `|`, `;` and newlines with every part checked. The filter is a pure function covered by a table-driven automation test.
 
 **0.1.0** — first release: play-mode inspector, Enhanced Input simulation, console/log/Live Coding, Blueprint component tools, game viewport screenshots.
 

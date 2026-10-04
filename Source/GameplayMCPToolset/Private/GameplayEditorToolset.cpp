@@ -2,10 +2,12 @@
 
 #include "GameplayEditorToolset.h"
 
+#include "GameplayConsoleFilter.h"
 #include "GameplayLogCapture.h"
 #include "GameplayMCPHelpers.h"
 
 #include "Containers/Ticker.h"
+#include "HAL/IConsoleManager.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "Engine/World.h"
@@ -24,37 +26,11 @@
 
 namespace
 {
-	/** First words of commands that are never run: they quit the editor or end PIE, crash on purpose, run arbitrary scripts or write packages. */
-	const TCHAR* DeniedCommands[] = { TEXT("quit"), TEXT("exit"), TEXT("disconnect"), TEXT("debug"), TEXT("crash"), TEXT("exec"), TEXT("py"), TEXT("python") };
-
-	bool IsDenied(const FString& Command, FString& OutReason)
+	/** Runs the console-variable lookup the filter needs against the live console manager. */
+	bool IsRegisteredConsoleVariable(const FString& Word)
 	{
-		TArray<FString> Parts;
-		Command.ParseIntoArray(Parts, TEXT("|"), /*bCullEmpty*/ true);
-		for (const FString& Part : Parts)
-		{
-			TArray<FString> Words;
-			Part.TrimStartAndEnd().ParseIntoArrayWS(Words);
-			if (Words.Num() == 0)
-			{
-				continue;
-			}
-			const FString First = Words[0].ToLower();
-			for (const TCHAR* Denied : DeniedCommands)
-			{
-				if (First == Denied)
-				{
-					OutReason = FString::Printf(TEXT("'%s' is refused: it would quit the editor, end PIE, crash on purpose or run a script. Refused commands: quit, exit, disconnect, debug, crash, exec, py, python, obj savepackage. Use pie_stop to end PIE."), *Words[0]);
-					return true;
-				}
-			}
-			if (First == TEXT("obj") && Words.Num() > 1 && Words[1].Equals(TEXT("savepackage"), ESearchCase::IgnoreCase))
-			{
-				OutReason = TEXT("'obj savepackage' is refused: these tools never save packages from a console command.");
-				return true;
-			}
-		}
-		return false;
+		IConsoleObject* Object = IConsoleManager::Get().FindConsoleObject(*Word, /*bTrackFrequentCalls*/ false);
+		return Object && Object->AsVariable() != nullptr;
 	}
 
 	FString VerbosityName(ELogVerbosity::Type Verbosity)
@@ -256,19 +232,15 @@ namespace GameplayLiveCoding
 	}
 }
 
-FGameplayMCPResult UGameplayEditorToolset::editor_run_console_command(const FString& command, const FString& target)
+FGameplayMCPResult UGameplayEditorToolset::editor_run_console_command(const FString& command, const FString& target, bool allow_unsafe)
 {
 	GAMEPLAYMCP_REQUIRE_GAME_THREAD();
 
-	const FString Command = command.TrimStartAndEnd();
-	if (Command.IsEmpty())
+	const FString Command = command;
+	const GameplayConsoleFilter::FResult Filter = GameplayConsoleFilter::Check(Command, allow_unsafe, &IsRegisteredConsoleVariable);
+	if (!Filter.bAllowed)
 	{
-		return GameplayMCP::Fail(TEXT("command is empty."));
-	}
-	FString Reason;
-	if (IsDenied(Command, Reason))
-	{
-		return GameplayMCP::Fail(Reason);
+		return GameplayMCP::Fail(Filter.Message);
 	}
 
 	const FString Target = GameplayMCP::IsUnset(target) ? FString(TEXT("auto")) : target.TrimStartAndEnd().ToLower();
@@ -287,31 +259,33 @@ FGameplayMCPResult UGameplayEditorToolset::editor_run_console_command(const FStr
 		return GameplayMCP::Fail(TEXT("The editor is not available."));
 	}
 
+	// Run exactly the segments the filter checked, one at a time.
 	const uint64 FirstLogId = FGameplayLogCapture::Get().GetLastId();
 	FString Output;
-	FString UsedTarget;
+	FString UsedTarget = PIEWorld ? TEXT("pie") : TEXT("editor");
 	bool bHandled = true;
-	if (PIEWorld)
+	for (const GameplayConsoleFilter::FSegment& Segment : Filter.Segments)
 	{
-		UsedTarget = TEXT("pie");
-		if (APlayerController* Controller = GameplayMCP::GetLocalPlayerController(PIEWorld, 0))
+		if (PIEWorld)
 		{
-			// Same route as typing in the game console: player input, controller, pawn, cheat manager, game instance, engine.
-			Output = Controller->ConsoleCommand(Command, /*bWriteToLog*/ true);
+			if (APlayerController* Controller = GameplayMCP::GetLocalPlayerController(PIEWorld, 0))
+			{
+				// Same route as typing in the game console: player input, controller, pawn, cheat manager, game instance, engine.
+				Output += Controller->ConsoleCommand(Segment.Text, /*bWriteToLog*/ true);
+			}
+			else
+			{
+				FStringOutputDevice Device;
+				bHandled &= GEngine->Exec(PIEWorld, *Segment.Text, Device);
+				Output += Device;
+			}
 		}
 		else
 		{
 			FStringOutputDevice Device;
-			bHandled = GEngine->Exec(PIEWorld, *Command, Device);
-			Output = Device;
+			bHandled &= GEditor->Exec(GEditor->GetEditorWorldContext().World(), *Segment.Text, Device);
+			Output += Device;
 		}
-	}
-	else
-	{
-		UsedTarget = TEXT("editor");
-		FStringOutputDevice Device;
-		bHandled = GEditor->Exec(GEditor->GetEditorWorldContext().World(), *Command, Device);
-		Output = Device;
 	}
 
 	TArray<TSharedRef<FJsonObject>> Log;
@@ -327,6 +301,13 @@ FGameplayMCPResult UGameplayEditorToolset::editor_run_console_command(const FStr
 
 	TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("command"), Command);
+	Payload->SetStringField(TEXT("rule"), GameplayConsoleFilter::RuleName(Filter.Rule));
+	TArray<FString> Segments;
+	for (const GameplayConsoleFilter::FSegment& Segment : Filter.Segments)
+	{
+		Segments.Add(Segment.Text);
+	}
+	Payload->SetArrayField(TEXT("segments"), GameplayMCP::ToJsonArray(Segments));
 	Payload->SetStringField(TEXT("target"), UsedTarget);
 	Payload->SetStringField(TEXT("output"), GameplayMCP::Truncate(Output.TrimStartAndEnd(), 20000));
 	Payload->SetArrayField(TEXT("log"), GameplayMCP::ToJsonArray(Log));

@@ -436,10 +436,15 @@ def test_phase3_editor():
     r = ok(ED, "editor_run_console_command", command="r.VSync")
     text = (r or {}).get("output", "") + " ".join(l["message"] for l in (r or {}).get("log", []))
     check(r and r["target"] == "editor" and "r.VSync" in text and r["recognized"], "console command output captured in editor", r)
-    r = ok(ED, "editor_run_console_command", command="gmcp_not_a_command_xyz")
-    check(r and r["recognized"] is False, "unknown command reported as not recognized", r)
-    for denied in ("quit", "EXIT", "stat fps | exit", "obj savepackage /Game/GMCPTest/TestMap", "py print(1)", "debug crash", "disconnect"):
-        expect_fail(ED, "editor_run_console_command", contains="refused", command=denied)
+    # Refusals are checked for the refusal only: none of these is ever executed.
+    for denied in ("quit", "EXIT", "QUIT_EDITOR_TYPO_CHECK", "close_editor", "  quit", "stat fps | exit", "stat fps; quit",
+                   "obj savepackage /Game/GMCPTest/TestMap", "py print(1)", "debug crash", "disconnect"):
+        expect_fail(ED, "editor_run_console_command", contains="rule hard_deny", command=denied)
+        expect_fail(ED, "editor_run_console_command", contains="rule hard_deny", command=denied, allow_unsafe=True)
+    expect_fail(ED, "editor_run_console_command", contains="rule allowlist_miss", command="gmcp_not_a_command_xyz")
+    expect_fail(ED, "editor_run_console_command", contains="allow_unsafe=true", command="transaction undo")
+    r = ok(ED, "editor_run_console_command", command="stat fps; r.VSync", target="editor")
+    check(r and r["rule"] == "allowed" and r["segments"] == ["stat fps", "r.VSync"], "chain split into checked segments", r and (r["rule"], r["segments"]))
     expect_fail(ED, "editor_run_console_command", contains="No Play-In-Editor session", command="stat fps", target="pie")
     expect_fail(ED, "editor_run_console_command", contains="target must be", command="stat fps", target="server")
 
@@ -578,7 +583,7 @@ def test_phase4():
     # Every edit is one undoable transaction.
     ok(BPT, "bp_add_component", blueprint_path=A, component_class="StaticMeshComponent", name="Temp")
     if has_toolset(ED):
-        ok(ED, "editor_run_console_command", command="TRANSACTION UNDO", target="editor")
+        ok(ED, "editor_run_console_command", command="TRANSACTION UNDO", target="editor", allow_unsafe=True)
         check("Temp" not in components(A), "undo removes the added component", sorted(components(A)))
     else:
         call(BPT, "bp_remove_component", blueprint_path=A, name="Temp")
