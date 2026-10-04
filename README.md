@@ -1,6 +1,6 @@
 # GameplayMCPToolset
 
-An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, read animation state, drive Enhanced Input like a player would, run console commands, read the output log and trigger Live Coding.
+An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, read animation state, drive Enhanced Input like a player would, run console commands, read the output log, trigger Live Coding, and edit Blueprint components.
 
 It works with any project. Nothing in it is tied to a specific game, character or asset.
 
@@ -46,6 +46,7 @@ The tools are registered with Epic's **Toolset Registry**, and Epic's **Unreal M
 - **PIE tools need a running session.** Without one they fail with *"No Play-In-Editor session is running…"*. Only `pie_start` and `pie_stop` start or stop PIE.
 - **PIE writes stay in PIE.** Set and call tools only act on objects that live in the PIE world, never on editor-world actors or assets. Property paths that would follow a reference into an asset are refused for writes.
 - **Parse first, then write.** `pie_set_property` imports the value into a scratch copy; the live value is only touched if the whole value parsed. Unknown struct members, trailing text (`12abc`) and non-integers for integer properties are rejected.
+- **Editor assets.** Edits run inside an `FScopedTransaction` with `Modify()` (Ctrl+Z works), only mark packages dirty, never save on their own, never delete assets, refuse assets outside `/Game` and refuse name collisions.
 - **Optional string parameters** use explicit defaults (`"*"`, `"none"`, `"{}"`) instead of empty strings, because the UE 5.8 Toolset Registry only treats a parameter as optional if its schema carries a non-empty default. Empty strings are still accepted when passed explicitly.
 
 ## Tools
@@ -115,6 +116,25 @@ Every input tool **returns a `job_id` at once**; the job then runs on the editor
 
 **Live Coding route.** `ILiveCodingModule::Compile(ELiveCodingCompileFlags::None, …)` returns at once with `InProgress` (the `WaitForCompletion` flag would block the game thread, so it is not used). The job watches `IsCompiling()` and the result line Live Coding logs when it finishes, then reads compiler diagnostics from UnrealBuildTool's log, which lives at `%LOCALAPPDATA%/UnrealBuildTool/Log.txt` for installed engines and `Engine/Programs/UnrealBuildTool/Log.txt` for source builds.
 
+### Phase 4 — Blueprint components (`GameplayBlueprintToolset`)
+
+Edits an Actor Blueprint's Simple Construction Script through `USubobjectDataSubsystem`, the same layer the Blueprint editor's Components panel uses. Components are identified by **name** (their variable name, e.g. `Mesh`, `DefaultSceneRoot`), never by index. Each one has a `source`:
+
+- `added` — in this Blueprint's construction script: can be renamed, reparented and removed.
+- `inherited` — added by a parent Blueprint: edit it in that Blueprint.
+- `native` — declared in C++ (e.g. a Character's `CapsuleComponent`, `Mesh`, `CharacterMovement`): can be used as a parent, never renamed, moved or removed.
+
+Every change is one undoable transaction (`FScopedTransaction` + `Modify()`), then the Blueprint is compiled and marked dirty. Nothing is written to disk until `bp_save_asset`. Only Blueprints under `/Game` can be changed.
+
+| Tool | Purpose |
+|---|---|
+| `bp_list_components(blueprint_path)` | Every component with class, parent, children, source, scene/root flags, socket, and what the editor allows (`can_rename`, `can_remove`, `can_reparent`). |
+| `bp_add_component(blueprint_path, component_class, name, parent="none")` | Add a component. Class by name (`StaticMeshComponent`, `PointLight`), `/Script/…` path or Blueprint component path. `parent="none"` attaches scene components to the existing scene root (native, inherited or added) and never replaces it; non-scene components take no parent. Rejects abstract, deprecated and non-spawnable classes and used names. |
+| `bp_remove_component(blueprint_path, name)` | Remove an `added` component. Refuses inherited and native components, and components that still have children. |
+| `bp_rename_component(blueprint_path, name, new_name)` | Rename an `added` component (name validated by the editor's own rules). |
+| `bp_reparent_component(blueprint_path, name, new_parent)` | Attach an `added` scene component to another scene component (added, inherited or native), keeping its relative transform. Refuses the scene root, cycles and non-scene components. |
+| `bp_save_asset(blueprint_path)` | Save the asset. The only tool in this plugin that writes asset files. |
+
 ## Calling tools through Unreal MCP
 
 With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees three meta-tools: `list_toolsets`, `describe_toolset` and `call_tool`. Call a tool like this:
@@ -135,6 +155,9 @@ With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees thr
 
 **Phase 3 — Editor commands and building**
 > I changed `AMyCharacter::Jump` in C++. Live-compile it, show me any compiler errors, and if it succeeded start PIE, run `slomo 0.25`, tap jump once and give me the last 20 warnings from the output log.
+
+**Phase 4 — Blueprint components**
+> In `/Game/Blueprints/BP_Door`, add a `BoxComponent` called `OpenTrigger` under `DoorFrame` and a `PointLight` called `Lamp` under the scene root, rename `StaticMesh1` to `Panel`, then list the components and save the Blueprint.
 
 ## License
 

@@ -3,6 +3,7 @@
 #include "Modules/ModuleManager.h"
 #include "ToolsetRegistry/UToolsetRegistry.h"
 
+#include "GameplayBlueprintToolset.h"
 #include "GameplayEditorToolset.h"
 #include "GameplayInputJobs.h"
 #include "GameplayInputToolset.h"
@@ -23,6 +24,7 @@ public:
 		UToolsetRegistry::RegisterToolsetClass(UGameplayPIEToolset::StaticClass());
 		UToolsetRegistry::RegisterToolsetClass(UGameplayInputToolset::StaticClass());
 		UToolsetRegistry::RegisterToolsetClass(UGameplayEditorToolset::StaticClass());
+		UToolsetRegistry::RegisterToolsetClass(UGameplayBlueprintToolset::StaticClass());
 	}
 
 	virtual void ShutdownModule() override
@@ -36,6 +38,7 @@ public:
 		{
 			return;
 		}
+		UToolsetRegistry::UnregisterToolsetClass(UGameplayBlueprintToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayEditorToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayInputToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayPIEToolset::StaticClass());

@@ -19,6 +19,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
 #include "JsonObjectConverter.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopeExit.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
@@ -350,6 +351,74 @@ namespace GameplayMCP
 			return nullptr;
 		}
 		return AnimInstance;
+	}
+
+	// ---- Assets ----------------------------------------------------------------------------
+
+	bool NormalizeObjectPath(const FString& InPath, FString& OutObjectPath, FString& OutError)
+	{
+		FString Path = InPath.TrimStartAndEnd();
+		if (Path.IsEmpty())
+		{
+			OutError = TEXT("Asset path is empty. Use a content path such as '/Game/Blueprints/BP_Door'.");
+			return false;
+		}
+		if (Path.Contains(TEXT("'")))
+		{
+			Path = FPackageName::ExportTextPathToObjectPath(Path);
+		}
+		if (!Path.StartsWith(TEXT("/")))
+		{
+			OutError = FString::Printf(TEXT("'%s' is not a content path. Paths start with '/', e.g. '/Game/Blueprints/BP_Door'."), *InPath);
+			return false;
+		}
+		FString PackageName = Path;
+		FString ObjectName;
+		if (Path.Split(TEXT("."), &PackageName, &ObjectName))
+		{
+			OutObjectPath = Path;
+		}
+		else
+		{
+			OutObjectPath = PackageName + TEXT(".") + FPackageName::GetLongPackageAssetName(PackageName);
+		}
+		if (!FPackageName::IsValidLongPackageName(PackageName))
+		{
+			OutError = FString::Printf(TEXT("'%s' is not a valid long package name."), *PackageName);
+			return false;
+		}
+		return true;
+	}
+
+	bool IsUnderGameRoot(const FString& PackageOrObjectPath)
+	{
+		return PackageOrObjectPath.StartsWith(TEXT("/Game/"));
+	}
+
+	UObject* LoadAssetChecked(const FString& Path, UClass* ExpectedClass, bool bForWrite, FString& OutError)
+	{
+		FString ObjectPath;
+		if (!NormalizeObjectPath(Path, ObjectPath, OutError))
+		{
+			return nullptr;
+		}
+		if (bForWrite && !IsUnderGameRoot(ObjectPath))
+		{
+			OutError = FString::Printf(TEXT("Refusing to modify '%s': only assets under /Game may be edited."), *ObjectPath);
+			return nullptr;
+		}
+		UObject* Asset = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath, nullptr, LOAD_NoWarn);
+		if (!Asset)
+		{
+			OutError = FString::Printf(TEXT("No asset found at '%s'."), *ObjectPath);
+			return nullptr;
+		}
+		if (ExpectedClass && !Asset->IsA(ExpectedClass))
+		{
+			OutError = FString::Printf(TEXT("'%s' is a %s, not a %s."), *ObjectPath, *Asset->GetClass()->GetName(), *ExpectedClass->GetName());
+			return nullptr;
+		}
+		return Asset;
 	}
 
 	// ---- JSON ------------------------------------------------------------------------------

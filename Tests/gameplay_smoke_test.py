@@ -505,6 +505,124 @@ def test_live_coding():
         check(st and st["result"] in ("no_changes", "success") and st["errors"] == [], "compile after restoring the file succeeds", st and {k: st[k] for k in ("result", "errors")})
 
 
+# ---- phase 4: blueprint components ------------------------------------------------------------
+
+BPT = "GameplayBlueprintToolset"
+
+
+RUN_TAG = time.strftime("%H%M%S")
+
+
+def make_blueprint(name, parent_class):
+    # A fresh, uniquely named fixture per run (assets are never deleted, even in the test project).
+    name = "%s_%s" % (name, RUN_TAG)
+    path = ROOT + "/" + name
+    factory = unreal.BlueprintFactory()
+    factory.set_editor_property("parent_class", parent_class)
+    bp = asset_tools.create_asset(name, ROOT, unreal.Blueprint, factory)
+    unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+    eal.save_loaded_asset(bp)
+    return path
+
+
+def components(path):
+    env = call(BPT, "bp_list_components", blueprint_path=path)
+    return {c["name"]: c for c in env["result"]["components"]} if env.get("success") else {}
+
+
+def test_phase4():
+    if not has_toolset(BPT):
+        skip("phase 4 (GameplayBlueprintToolset not registered)")
+        return
+    A = make_blueprint("BP_GMCPActor", unreal.Actor)
+    CH = make_blueprint("BP_GMCPChar", unreal.load_class(None, "/Script/GMCPTest.GMCPTestCharacter"))
+    log("fixture: blueprints ready")
+
+    r = ok(BPT, "bp_list_components", blueprint_path=A)
+    check(r and r["scene_root"] == "DefaultSceneRoot" and [c["name"] for c in r["components"]] == ["DefaultSceneRoot"], "list fresh actor blueprint", r)
+
+    r = ok(BPT, "bp_add_component", blueprint_path=A, component_class="StaticMeshComponent", name="Body")
+    check(r and r["component"]["parent"] == "DefaultSceneRoot" and r["component"]["source"] == "added" and r["compile_status"] == "up_to_date" and r["dirty"],
+          "add attaches to the scene root, compiles, marks dirty", r)
+    r = ok(BPT, "bp_add_component", blueprint_path=A, component_class="PointLight", name="Lamp", parent="Body")
+    check(r and r["component"]["class"] == "PointLightComponent" and r["component"]["parent"] == "Body", "add by short class name under a parent", r and r["component"])
+    ok(BPT, "bp_add_component", blueprint_path=A, component_class="/Script/Engine.SphereComponent", name="Trigger")
+    r = ok(BPT, "bp_add_component", blueprint_path=A, component_class="RotatingMovement", name="Spinner")
+    check(r and r["component"]["is_scene"] is False and r["component"]["parent"] == "", "add non-scene component", r and r["component"])
+    expect_fail(BPT, "bp_add_component", contains="not a scene component", blueprint_path=A, component_class="RotatingMovement", name="Spinner2", parent="Body")
+    expect_fail(BPT, "bp_add_component", contains="cannot be used", blueprint_path=A, component_class="StaticMeshComponent", name="Body")
+    expect_fail(BPT, "bp_add_component", contains="No class", blueprint_path=A, component_class="NotAClassAtAll", name="X1")
+    expect_fail(BPT, "bp_add_component", contains="not a component class", blueprint_path=A, component_class="Actor", name="X2")
+    expect_fail(BPT, "bp_add_component", contains="abstract", blueprint_path=A, component_class="PrimitiveComponent", name="X3")
+    expect_fail(BPT, "bp_add_component", contains="no component named", blueprint_path=A, component_class="StaticMeshComponent", name="X4", parent="Nope")
+    expect_fail(BPT, "bp_add_component", contains="cannot have children", blueprint_path=A, component_class="StaticMeshComponent", name="X5", parent="Spinner")
+
+    r = ok(BPT, "bp_rename_component", blueprint_path=A, name="Lamp", new_name="Light")
+    check(r and r["component"]["name"] == "Light" and r["component"]["parent"] == "Body", "rename keeps parent", r and r["component"])
+    expect_fail(BPT, "bp_rename_component", contains="cannot be used", blueprint_path=A, name="Light", new_name="Body")
+    expect_fail(BPT, "bp_rename_component", contains="already has that name", blueprint_path=A, name="Body", new_name="Body")
+
+    r = ok(BPT, "bp_reparent_component", blueprint_path=A, name="Light", new_parent="DefaultSceneRoot")
+    check(r and r["component"]["parent"] == "DefaultSceneRoot", "reparent to root", r and r["component"])
+    ok(BPT, "bp_reparent_component", blueprint_path=A, name="Body", new_parent="Trigger")
+    check(components(A).get("Body", {}).get("parent") == "Trigger" and "Body" in components(A).get("Trigger", {}).get("children", []), "children lists follow reparent", components(A).get("Trigger"))
+    expect_fail(BPT, "bp_reparent_component", contains="own ancestor", blueprint_path=A, name="Trigger", new_parent="Body")
+    expect_fail(BPT, "bp_reparent_component", contains="scene root", blueprint_path=A, name="DefaultSceneRoot", new_parent="Body")
+    expect_fail(BPT, "bp_reparent_component", contains="scene components", blueprint_path=A, name="Spinner", new_parent="Body")
+    expect_fail(BPT, "bp_reparent_component", contains="already attached", blueprint_path=A, name="Body", new_parent="Trigger")
+
+    expect_fail(BPT, "bp_remove_component", contains="still has children", blueprint_path=A, name="Trigger")
+    r = ok(BPT, "bp_remove_component", blueprint_path=A, name="Light")
+    check(r and r["removed"] == "Light" and sorted(components(A)) == ["Body", "DefaultSceneRoot", "Spinner", "Trigger"], "remove leaf component", sorted(components(A)))
+
+    # Every edit is one undoable transaction.
+    ok(BPT, "bp_add_component", blueprint_path=A, component_class="StaticMeshComponent", name="Temp")
+    if has_toolset(ED):
+        ok(ED, "editor_run_console_command", command="TRANSACTION UNDO", target="editor")
+        check("Temp" not in components(A), "undo removes the added component", sorted(components(A)))
+    else:
+        call(BPT, "bp_remove_component", blueprint_path=A, name="Temp")
+
+    # Child Blueprint: components from the parent Blueprint are inherited.
+    C = make_blueprint("BP_GMCPChild", unreal.EditorAssetLibrary.load_blueprint_class(A))
+    comps = components(C)
+    check(comps.get("Body", {}).get("source") == "inherited" and comps.get("Spinner", {}).get("source") == "inherited", "child lists inherited components", {k: v["source"] for k, v in comps.items()})
+    expect_fail(BPT, "bp_remove_component", contains="inherited from the parent Blueprint", blueprint_path=C, name="Body")
+    expect_fail(BPT, "bp_rename_component", contains="inherited", blueprint_path=C, name="Trigger", new_name="Zone")
+    r = ok(BPT, "bp_add_component", blueprint_path=C, component_class="StaticMeshComponent", name="ChildMesh", parent="Body")
+    check(r and r["component"]["parent"] == "Body" and r["component"]["source"] == "added", "add under an inherited parent", r and r["component"])
+
+    # C++ character Blueprint: native components, native scene root.
+    comps = components(CH)
+    check(comps.get("CapsuleComponent", {}).get("is_root") and comps["CapsuleComponent"]["source"] == "native" and comps.get("Mesh", {}).get("source") == "native",
+          "native components listed with their variable names", {k: (v["source"], v["parent"]) for k, v in comps.items()})
+    r = ok(BPT, "bp_add_component", blueprint_path=CH, component_class="StaticMeshComponent", name="Weapon", parent="Mesh")
+    check(r and r["component"]["parent"] == "Mesh", "add under a native component", r and r["component"])
+    r = ok(BPT, "bp_add_component", blueprint_path=CH, component_class="StaticMeshComponent", name="Hat")
+    r2 = ok(BPT, "bp_list_components", blueprint_path=CH)
+    check(r and r["component"]["parent"] == "CapsuleComponent" and r2 and r2["scene_root"] == "CapsuleComponent", "add without parent attaches to the native root and keeps it", r and r["component"])
+    expect_fail(BPT, "bp_remove_component", contains="native component", blueprint_path=CH, name="Mesh")
+    expect_fail(BPT, "bp_rename_component", contains="native component", blueprint_path=CH, name="CharacterMovement", new_name="Moves")
+    expect_fail(BPT, "bp_reparent_component", contains="native component", blueprint_path=CH, name="Mesh", new_parent="Weapon")
+    ok(BPT, "bp_reparent_component", blueprint_path=CH, name="Hat", new_parent="Mesh")
+
+    expect_fail(BPT, "bp_list_components", contains="No asset found", blueprint_path=ROOT + "/BP_Nope")
+    expect_fail(BPT, "bp_list_components", contains="not a Blueprint", blueprint_path=ROOT + "/AM_GMCPTest")
+    expect_fail(BPT, "bp_add_component", contains="only assets under /Game", blueprint_path="/Engine/BasicShapes/Cube", component_class="StaticMeshComponent", name="X")
+
+    # Nothing is saved until bp_save_asset.
+    check(unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages() is not None, "dirty packages query works")
+    dirty = [p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()]
+    check(A.split(".")[0] in dirty and CH.split(".")[0] in dirty, "edited blueprints are dirty, not saved", dirty)
+    r = ok(BPT, "bp_save_asset", blueprint_path=A)
+    check(r and r["saved"] is True, "save writes a dirty blueprint", r)
+    r = ok(BPT, "bp_save_asset", blueprint_path=A)
+    check(r and r["saved"] is False, "second save has nothing to do", r)
+    expect_fail(BPT, "bp_save_asset", contains="only assets under /Game", blueprint_path="/Engine/BasicShapes/Cube")
+    for path in (C, CH):
+        call(BPT, "bp_save_asset", blueprint_path=path)
+
+
 def bridge_wait():
     if os.environ.get("GMCP_MCP_BRIDGE") != "1":
         skip("MCP bridge test (set GMCP_MCP_BRIDGE=1 and run Tests/mcp_bridge_test.py)")
@@ -559,6 +677,7 @@ def sequence():
         check(st and st["state"] == "cancelled" and "PIE session ended" in st["error"] and st["held"] == [], "PIE end cancels and releases input jobs", st)
         expect_fail(INP, "input_tap_action", contains="No Play-In-Editor session", action="IA_Jump")
 
+    test_phase4()
     yield from test_live_coding()
 
 

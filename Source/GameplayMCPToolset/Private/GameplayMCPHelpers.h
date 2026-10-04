@@ -67,6 +67,20 @@ namespace GameplayMCP
 	 */
 	UObject* ResolvePIETarget(UWorld* World, const FString& ActorName, const FString& ComponentName, FString& OutError);
 
+	// ---- Assets ----------------------------------------------------------------------------
+
+	/**
+	 * Converts any accepted spelling of an asset path ("/Game/A/B", "/Game/A/B.B",
+	 * "/Script/Engine.Blueprint'/Game/A/B.B'") into a full object path "/Game/A/B.B".
+	 */
+	bool NormalizeObjectPath(const FString& InPath, FString& OutObjectPath, FString& OutError);
+
+	/** True if the package lives under /Game. */
+	bool IsUnderGameRoot(const FString& PackageOrObjectPath);
+
+	/** Loads an asset of the expected class. With bForWrite the asset must live under /Game. */
+	UObject* LoadAssetChecked(const FString& Path, UClass* ExpectedClass, bool bForWrite, FString& OutError);
+
 	// ---- JSON ------------------------------------------------------------------------------
 
 	TSharedRef<FJsonObject> VectorToJson(const FVector& Vector);
