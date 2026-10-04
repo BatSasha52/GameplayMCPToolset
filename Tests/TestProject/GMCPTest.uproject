@@ -1,0 +1,11 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.8",
+	"Modules": [ { "Name": "GMCPTest", "Type": "Runtime", "LoadingPhase": "Default", "AdditionalDependencies": [ "Engine", "EnhancedInput" ] } ],
+	"Plugins": [
+		{ "Name": "GameplayMCPToolset", "Enabled": true },
+		{ "Name": "AnimMCPToolset", "Enabled": true },
+		{ "Name": "EnhancedInput", "Enabled": true },
+		{ "Name": "PythonScriptPlugin", "Enabled": true }
+	]
+}
