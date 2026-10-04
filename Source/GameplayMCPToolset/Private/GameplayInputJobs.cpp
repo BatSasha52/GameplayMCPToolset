@@ -73,10 +73,13 @@ void FGameplayInputJobs::Startup()
 
 void FGameplayInputJobs::Shutdown()
 {
-	Cancel(INDEX_NONE, TEXT("module shutting down"));
+	if (UObjectInitialized())
+	{
+		Cancel(INDEX_NONE, TEXT("module shutting down"));
+	}
 	FTSTicker::RemoveTicker(TickerHandle);
 	FEditorDelegates::PrePIEEnded.Remove(PrePIEEndedHandle);
-	Jobs.Reset();
+	Jobs.Empty();
 }
 
 double FGameplayInputJobs::EstimateDuration(const TArray<FStep>& Steps)

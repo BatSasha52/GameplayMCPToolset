@@ -1,6 +1,6 @@
 # GameplayMCPToolset
 
-An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, read animation state, and drive Enhanced Input like a player would.
+An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, read animation state, drive Enhanced Input like a player would, run console commands, read the output log and trigger Live Coding.
 
 It works with any project. Nothing in it is tied to a specific game, character or asset.
 
@@ -101,6 +101,20 @@ Every input tool **returns a `job_id` at once**; the job then runs on the editor
   { "type": "axis", "action": "IA_Look", "value": "0,0", "end_value": "1,0", "duration": 0.5 } ]
 ```
 
+### Phase 3 — Editor commands and building (`GameplayEditorToolset`)
+
+| Tool | Purpose |
+|---|---|
+| `editor_run_console_command(command, target="auto")` | Run a console command and return its output plus every log line it produced. `auto` runs it through the PIE local player's controller when PIE is running (so cheats and game commands such as `slomo` work), otherwise in the editor. `pie` / `editor` force a target. Reports `recognized: false` for unknown commands. |
+| `editor_get_recent_log(max_lines=100, log_category="*", min_verbosity="log", contains="*", after_id=0)` | Tail of the output log with category (wildcards), verbosity and text filters. Pass the returned `latest_id` as `after_id` to read only new lines. Holds the last 10000 lines logged after the plugin loaded. |
+| `editor_live_coding_compile()` | Start a Live Coding compile (Ctrl+Alt+F11) **without blocking** and return a `job_id`. |
+| `editor_live_coding_status(job_id="latest")` | `compiling` / `completed`, result (`success`, `no_changes`, `failure`, `cancelled`, `unknown`), compiler `errors` and `warnings` with file and line, and the Live Coding output. |
+
+**Refused console commands.** The first word of every `|`-separated part is checked; these are always refused because they quit the editor or end PIE, crash on purpose, run arbitrary scripts or write packages:
+`quit`, `exit`, `disconnect`, `debug` (crash/assert/hang family), `crash`, `exec`, `py`, `python`, and `obj savepackage`. Use `pie_stop` to end PIE.
+
+**Live Coding route.** `ILiveCodingModule::Compile(ELiveCodingCompileFlags::None, …)` returns at once with `InProgress` (the `WaitForCompletion` flag would block the game thread, so it is not used). The job watches `IsCompiling()` and the result line Live Coding logs when it finishes, then reads compiler diagnostics from UnrealBuildTool's log, which lives at `%LOCALAPPDATA%/UnrealBuildTool/Log.txt` for installed engines and `Engine/Programs/UnrealBuildTool/Log.txt` for source builds.
+
 ## Calling tools through Unreal MCP
 
 With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees three meta-tools: `list_toolsets`, `describe_toolset` and `call_tool`. Call a tool like this:
@@ -118,6 +132,9 @@ With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees thr
 
 **Phase 2 — Input simulation**
 > In PIE, hold `IA_Move` forward for 2 seconds, then double-tap `IA_Jump`. Wait for the input job to finish and tell me how far the pawn moved, whether it left the ground, and which anim state it was in while moving.
+
+**Phase 3 — Editor commands and building**
+> I changed `AMyCharacter::Jump` in C++. Live-compile it, show me any compiler errors, and if it succeeded start PIE, run `slomo 0.25`, tap jump once and give me the last 20 warnings from the output log.
 
 ## License
 

@@ -3,8 +3,10 @@
 #include "Modules/ModuleManager.h"
 #include "ToolsetRegistry/UToolsetRegistry.h"
 
+#include "GameplayEditorToolset.h"
 #include "GameplayInputJobs.h"
 #include "GameplayInputToolset.h"
+#include "GameplayLogCapture.h"
 #include "GameplayPIEToolset.h"
 
 /**
@@ -16,18 +18,25 @@ class FGameplayMCPToolsetModule : public IModuleInterface
 public:
 	virtual void StartupModule() override
 	{
+		FGameplayLogCapture::Get().Startup();
 		FGameplayInputJobs::Get().Startup();
 		UToolsetRegistry::RegisterToolsetClass(UGameplayPIEToolset::StaticClass());
 		UToolsetRegistry::RegisterToolsetClass(UGameplayInputToolset::StaticClass());
+		UToolsetRegistry::RegisterToolsetClass(UGameplayEditorToolset::StaticClass());
 	}
 
 	virtual void ShutdownModule() override
 	{
+		// Tickers, delegates and the log device are released even late in engine shutdown, so nothing
+		// of this module is left registered (or holding memory) when static destructors run.
+		GameplayLiveCoding::Shutdown();
+		FGameplayInputJobs::Get().Shutdown();
+		FGameplayLogCapture::Get().Shutdown();
 		if (!UObjectInitialized())
 		{
 			return;
 		}
-		FGameplayInputJobs::Get().Shutdown();
+		UToolsetRegistry::UnregisterToolsetClass(UGameplayEditorToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayInputToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayPIEToolset::StaticClass());
 	}

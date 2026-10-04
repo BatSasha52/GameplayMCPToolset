@@ -424,6 +424,87 @@ def test_phase2():
     check(r and len(r["jobs"]) >= 6, "input_status lists retained jobs", r and len(r["jobs"]))
 
 
+# ---- phase 3: editor commands, log, live coding ------------------------------------------------
+
+ED = "GameplayEditorToolset"
+
+
+def test_phase3_editor():
+    if not has_toolset(ED):
+        skip("phase 3 (GameplayEditorToolset not registered)")
+        return
+    r = ok(ED, "editor_run_console_command", command="r.VSync")
+    text = (r or {}).get("output", "") + " ".join(l["message"] for l in (r or {}).get("log", []))
+    check(r and r["target"] == "editor" and "r.VSync" in text and r["recognized"], "console command output captured in editor", r)
+    r = ok(ED, "editor_run_console_command", command="gmcp_not_a_command_xyz")
+    check(r and r["recognized"] is False, "unknown command reported as not recognized", r)
+    for denied in ("quit", "EXIT", "stat fps | exit", "obj savepackage /Game/GMCPTest/TestMap", "py print(1)", "debug crash", "disconnect"):
+        expect_fail(ED, "editor_run_console_command", contains="refused", command=denied)
+    expect_fail(ED, "editor_run_console_command", contains="No Play-In-Editor session", command="stat fps", target="pie")
+    expect_fail(ED, "editor_run_console_command", contains="target must be", command="stat fps", target="server")
+
+    unreal.log_warning("GMCP_MARKER_ONE")
+    r = ok(ED, "editor_get_recent_log", contains="GMCP_MARKER_ONE", min_verbosity="warning")
+    check(r and r["count"] == 1 and r["lines"][0]["category"] == "LogPython" and r["lines"][0]["verbosity"] == "warning", "log line with category and verbosity", r)
+    after = r and r["latest_id"]
+    unreal.log("GMCP_MARKER_TWO")
+    r = ok(ED, "editor_get_recent_log", contains="GMCP_MARKER", after_id=after)
+    msgs = [l["message"] for l in (r or {}).get("lines", [])]
+    check(r and all(l["id"] > after for l in r["lines"]) and "GMCP_MARKER_TWO" in msgs and "GMCP_MARKER_ONE" not in msgs, "after_id returns only newer lines", r)
+    r = ok(ED, "editor_get_recent_log", contains="GMCP_MARKER_TWO", min_verbosity="warning")
+    check(r and r["count"] == 0, "min_verbosity filters out lower levels", r)
+    r = ok(ED, "editor_get_recent_log", log_category="LogPyth*", max_lines=5)
+    check(r and 0 < r["count"] <= 5 and all(l["category"] == "LogPython" for l in r["lines"]), "category wildcard and max_lines", r and r["count"])
+    expect_fail(ED, "editor_get_recent_log", contains="min_verbosity", min_verbosity="loud")
+    expect_fail(ED, "editor_get_recent_log", contains="max_lines", max_lines=0)
+
+
+def test_phase3_pie():
+    if not has_toolset(ED):
+        return
+    r = ok(ED, "editor_run_console_command", command="slomo 0.5")
+    check(r and r["target"] == "pie", "auto target uses PIE while it runs", r)
+    check(prop("TimeDilation", actor="WorldSettings") == 0.5, "slomo changed the PIE world's time dilation", prop("TimeDilation", actor="WorldSettings"))
+    ok(ED, "editor_run_console_command", command="slomo 1", target="pie")
+    check(prop("TimeDilation", actor="WorldSettings") == 1, "slomo restored", prop("TimeDilation", actor="WorldSettings"))
+    r = ok(ED, "editor_run_console_command", command="r.VSync", target="editor")
+    check(r and r["target"] == "editor", "explicit editor target during PIE", r and r["target"])
+
+
+def test_live_coding():
+    if not has_toolset(ED):
+        return
+    if call(ED, "editor_live_coding_status").get("success") is False:
+        check(True, "editor_live_coding_status before any compile is an error")
+    r = ok(ED, "editor_live_coding_compile")
+    if not r:
+        return
+    check(r["state"] == "compiling", "live coding compile returns a job id at once", r)
+    expect_fail(ED, "editor_live_coding_compile", contains="already running")
+    yield from wait_until(lambda: (call(ED, "editor_live_coding_status", job_id=str(r["job_id"])).get("result") or {}).get("state") == "completed", 600, "live coding compile")
+    st = ok(ED, "editor_live_coding_status", job_id="latest")
+    check(st and st["result"] in ("no_changes", "success") and st["errors"] == [], "live coding finished without errors", st)
+    expect_fail(ED, "editor_live_coding_status", contains="No Live Coding job", job_id="999")
+
+    # Break a file of the throwaway project, check the compile error comes back, then restore it.
+    src = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()), "Source", "GMCPTest", "GMCPTest.cpp")
+    original = open(src, encoding="utf-8").read()
+    try:
+        open(src, "w", encoding="utf-8").write(original + "\nstatic int GMCPBrokenOnPurpose = ;\n")
+        r = ok(ED, "editor_live_coding_compile")
+        if r:
+            yield from wait_until(lambda: (call(ED, "editor_live_coding_status", job_id=str(r["job_id"])).get("result") or {}).get("state") == "completed", 600, "broken live coding compile")
+            st = ok(ED, "editor_live_coding_status", job_id=str(r["job_id"]))
+            check(st and st["result"] == "failure" and any("GMCP" in e or "GMCPTest.cpp" in e for e in st["errors"]), "compile error reported with file and message", st and {k: st[k] for k in ("result", "errors")})
+    finally:
+        open(src, "w", encoding="utf-8").write(original)
+    r = ok(ED, "editor_live_coding_compile")
+    if r:
+        yield from wait_until(lambda: (call(ED, "editor_live_coding_status", job_id=str(r["job_id"])).get("result") or {}).get("state") == "completed", 600, "restored live coding compile")
+        st = ok(ED, "editor_live_coding_status", job_id=str(r["job_id"]))
+        check(st and st["result"] in ("no_changes", "success") and st["errors"] == [], "compile after restoring the file succeeds", st and {k: st[k] for k in ("result", "errors")})
+
+
 def bridge_wait():
     if os.environ.get("GMCP_MCP_BRIDGE") != "1":
         skip("MCP bridge test (set GMCP_MCP_BRIDGE=1 and run Tests/mcp_bridge_test.py)")
@@ -449,6 +530,7 @@ def sequence():
     yield
 
     test_phase1_before_pie()
+    test_phase3_editor()
     ok("GameplayPIEToolset", "pie_start")
     if not (yield from wait_until(pie_running, 90, "PIE to start")):
         return
@@ -459,6 +541,7 @@ def sequence():
     test_anim_state("Idle", "anim state at rest")
     test_montage()
     yield from test_phase2()
+    test_phase3_pie()
 
     yield from bridge_wait()
 
@@ -475,6 +558,8 @@ def sequence():
         st = job_state(held_job)
         check(st and st["state"] == "cancelled" and "PIE session ended" in st["error"] and st["held"] == [], "PIE end cancels and releases input jobs", st)
         expect_fail(INP, "input_tap_action", contains="No Play-In-Editor session", action="IA_Jump")
+
+    yield from test_live_coding()
 
 
 def run():
