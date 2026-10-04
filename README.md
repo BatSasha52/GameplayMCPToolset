@@ -106,7 +106,8 @@ Every input tool **returns a `job_id` at once**; the job then runs on the editor
 
 | Tool | Purpose |
 |---|---|
-| `editor_run_console_command(command, target="auto", allow_unsafe=false)` | Run a console command that passes the command filter (below) and return its output plus every log line it produced. `auto` runs it through the PIE local player's controller when PIE is running (so cheats and game commands such as `slomo` work), otherwise in the editor. `pie` / `editor` force a target. |
+| `editor_run_console_command(command, target="auto", allow_unsafe=false)` | Check a console command against the filter (below) and **queue** it; returns a `job_id` at once. It runs on a later frame, after the tool call has returned. `auto` runs it through the PIE local player's controller when PIE is running (so cheats and game commands such as `slomo` work), otherwise in the editor; `pie` / `editor` force a target. |
+| `editor_get_command_result(job_id="latest")` | `queued` / `running` / `done` / `cancelled`, the command output, every log line captured while it ran and during the next frame, `recognized`, and `world_changed` with a list of `changes` (PIE running, PIE world, paused, time dilation, editor world) between `before` and `after`. |
 | `editor_get_recent_log(max_lines=100, log_category="*", min_verbosity="log", contains="*", after_id=0)` | Tail of the output log with category (wildcards), verbosity and text filters. Pass the returned `latest_id` as `after_id` to read only new lines. Holds the last 10000 lines logged after the plugin loaded. |
 | `editor_live_coding_compile()` | Start a Live Coding compile (Ctrl+Alt+F11) **without blocking** and return a `job_id`. |
 | `editor_live_coding_status(job_id="latest")` | `compiling` / `completed`, result (`success`, `no_changes`, `failure`, `cancelled`, `unknown`), compiler `errors` and `warnings` with file and line, and the Live Coding output. |
@@ -118,6 +119,8 @@ Every input tool **returns a `job_id` at once**; the job then runs on the editor
 - **Anything else** is refused with rule `allowlist_miss` unless you pass `allow_unsafe=true` (e.g. `transaction undo`).
 - **Hard deny** (rule `hard_deny`): refused **even with `allow_unsafe=true`**. Matched as **prefixes** of the first word, case-insensitively, like the engine matches them: `quit`, `exit`, `quit_editor`, `close_editor`, `close_slate_mainframe`, `debug` (crash/hang/assert/terminate family), `crash`, `gpf`, `fatal`, `terminate`, `abort`, `stackoverflow`, `shutdown`, `disconnect` (ends PIE), `exec` (runs a file of commands the filter never sees), `py`, `python`. Also any first word *containing* `quit`, `exit`, `crash`, `terminate` or `shutdown` (e.g. `csv.ExitOnCompletion`), and `obj savepackage`. Use `pie_stop` to end PIE.
 - Every refusal names the command, the segment and the rule that matched.
+
+**Deferred execution.** A command never runs inside the tool call that requested it. `editor_run_console_command` checks it, queues it and returns `{job_id, state: "queued"}`; a core-ticker job runs the checked segments at least two frames later, once the tool result has gone back, so a command that tears down PIE or other state cannot pull the world out from under an in-flight call. During execution and the following frame, a job-owned `FOutputDevice` on `GLog` captures the log; it is removed when the job finishes, is cancelled, or the module shuts down. Queued jobs are cancelled when PIE ends before they run. Poll `editor_get_command_result` until `state` is `done` or `cancelled`.
 
 > ⚠️ Even allowed commands can change editor or game state (`pause`, `slomo`, console variables, `restartlevel` reloads the PIE level). Prefer the dedicated tools where they exist.
 
@@ -191,12 +194,12 @@ Everything is tested end to end in a throwaway project (not part of any game), w
 - `Source/GameplayMCPToolset/Private/Tests/GameplayConsoleFilterTest.cpp` is an automation test (`GameplayMCPToolset.ConsoleFilter`) that checks the console command filter as a pure function against a table of cases. Nothing is executed. Run it headless: `UnrealEditor-Cmd.exe <Project>.uproject -ExecCmds="Automation RunTests GameplayMCPToolset.ConsoleFilter" -TestExit="Automation Test Queue Empty" -unattended -nullrhi`.
 - `Tests/mcp_bridge_test.py` (plain Python 3) talks to the **real Unreal MCP HTTP server** while the editor test is paused in PIE (`GMCP_MCP_BRIDGE=1`): `initialize`, `tools/list`, `list_toolsets`, `describe_toolset` and `call_tool` for PIE, input, console and screenshot tools, the error envelope, and the dotted-name failure.
 
-**Results for 0.1.0** (UE 5.8.3, Win64): `RunUAT BuildPlugin` compiles with 0 errors and 0 warnings. 269 checks with 0 failures in the editor test, and 14 with 0 failures over MCP HTTP. Highlights of what is checked against real game state rather than just tool output:
+**Results for 0.1.1** (UE 5.8.3, Win64): `RunUAT BuildPlugin` compiles with 0 errors and 0 warnings. The console filter table test passes (60 cases, and a deliberately broken expectation makes it fail). 299 checks with 0 failures in the editor test, and 16 with 0 failures over MCP HTTP. Highlights of what is checked against real game state rather than just tool output:
 
 - Holding `IA_Move` moves the pawn and switches the anim Blueprint from Idle to Walk while held, then back to Idle.
 - Taps produce exactly N `Started`/`Completed` events in game, and an axis ramp delivers mid values.
 - Cancelling a job, or PIE ending mid-hold, releases the action (the game sees `Completed`).
-- `slomo` through the console tool changes the PIE world's time dilation.
+- Console commands are still `queued` when checked right after the call that requested them. `slomo` then changes the PIE world's time dilation and the result reports `time_dilation: 1.0 -> 0.5`. A PIE command queued just before `pie_stop` comes back `cancelled`. Refused commands (hard deny or allowlist miss) are only checked for the refusal and never executed.
 - A deliberately broken source file makes Live Coding report `failure` with the compiler error (`file(line,col): error C2059`); after the file is restored it compiles cleanly.
 - Blueprint edits compile, mark dirty without saving, and `TRANSACTION UNDO` reverts them.
 - Screenshots have the requested pixel size and no editor UI.
@@ -230,6 +233,7 @@ These could not be covered by the scripted run and have only been reasoned about
 ## Changelog
 
 **0.1.1**
+- `editor_run_console_command` no longer runs anything inside the tool call: it queues a job that runs on a later frame with a scoped log capture; new `editor_get_command_result` reports output, captured log, and whether the PIE/editor world changed. Queued jobs are cancelled cleanly when PIE ends or the module shuts down.
 - `editor_run_console_command`: allowlist + `allow_unsafe` instead of a blocklist; hard-deny list matched as prefixes like the engine does (fixes `QUIT_EDITOR_TYPO_CHECK` closing the editor); chains split on `|`, `;` and newlines with every part checked. The filter is a pure function covered by a table-driven automation test.
 
 **0.1.0** — first release: play-mode inspector, Enhanced Input simulation, console/log/Live Coding, Blueprint component tools, game viewport screenshots.

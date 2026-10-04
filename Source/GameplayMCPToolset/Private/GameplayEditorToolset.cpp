@@ -3,6 +3,7 @@
 #include "GameplayEditorToolset.h"
 
 #include "GameplayConsoleFilter.h"
+#include "GameplayConsoleJobs.h"
 #include "GameplayLogCapture.h"
 #include "GameplayMCPHelpers.h"
 
@@ -11,13 +12,11 @@
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "Engine/World.h"
-#include "GameFramework/PlayerController.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/App.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Misc/StringOutputDevice.h"
 #include "Modules/ModuleManager.h"
 
 #if WITH_LIVE_CODING
@@ -236,8 +235,7 @@ FGameplayMCPResult UGameplayEditorToolset::editor_run_console_command(const FStr
 {
 	GAMEPLAYMCP_REQUIRE_GAME_THREAD();
 
-	const FString Command = command;
-	const GameplayConsoleFilter::FResult Filter = GameplayConsoleFilter::Check(Command, allow_unsafe, &IsRegisteredConsoleVariable);
+	const GameplayConsoleFilter::FResult Filter = GameplayConsoleFilter::Check(command, allow_unsafe, &IsRegisteredConsoleVariable);
 	if (!Filter.bAllowed)
 	{
 		return GameplayMCP::Fail(Filter.Message);
@@ -249,70 +247,55 @@ FGameplayMCPResult UGameplayEditorToolset::editor_run_console_command(const FStr
 		return GameplayMCP::Fail(TEXT("target must be 'auto', 'pie' or 'editor'."));
 	}
 	FString Error;
-	UWorld* PIEWorld = Target == TEXT("editor") ? nullptr : GameplayMCP::GetPIEWorld(Error);
-	if (Target == TEXT("pie") && !PIEWorld)
+	if (Target == TEXT("pie") && !GameplayMCP::GetPIEWorld(Error))
 	{
 		return GameplayMCP::Fail(Error);
 	}
-	if (!GEditor)
-	{
-		return GameplayMCP::Fail(TEXT("The editor is not available."));
-	}
 
-	// Run exactly the segments the filter checked, one at a time.
-	const uint64 FirstLogId = FGameplayLogCapture::Get().GetLastId();
-	FString Output;
-	FString UsedTarget = PIEWorld ? TEXT("pie") : TEXT("editor");
-	bool bHandled = true;
-	for (const GameplayConsoleFilter::FSegment& Segment : Filter.Segments)
-	{
-		if (PIEWorld)
-		{
-			if (APlayerController* Controller = GameplayMCP::GetLocalPlayerController(PIEWorld, 0))
-			{
-				// Same route as typing in the game console: player input, controller, pawn, cheat manager, game instance, engine.
-				Output += Controller->ConsoleCommand(Segment.Text, /*bWriteToLog*/ true);
-			}
-			else
-			{
-				FStringOutputDevice Device;
-				bHandled &= GEngine->Exec(PIEWorld, *Segment.Text, Device);
-				Output += Device;
-			}
-		}
-		else
-		{
-			FStringOutputDevice Device;
-			bHandled &= GEditor->Exec(GEditor->GetEditorWorldContext().World(), *Segment.Text, Device);
-			Output += Device;
-		}
-	}
-
-	TArray<TSharedRef<FJsonObject>> Log;
-	bool bRecognized = bHandled && !Output.Contains(TEXT("Command not recognized"));
-	for (const FGameplayLogCapture::FLine& Line : FGameplayLogCapture::Get().GetLines(FirstLogId, 500, [](const FGameplayLogCapture::FLine&) { return true; }))
-	{
-		if (Line.Message.Contains(TEXT("Command not recognized")))
-		{
-			bRecognized = false;
-		}
-		Log.Add(LineToJson(Line, false));
-	}
-
-	TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("command"), Command);
-	Payload->SetStringField(TEXT("rule"), GameplayConsoleFilter::RuleName(Filter.Rule));
+	// Never run inside the tool call: queue it and run it on a later frame, after this result is returned.
 	TArray<FString> Segments;
 	for (const GameplayConsoleFilter::FSegment& Segment : Filter.Segments)
 	{
 		Segments.Add(Segment.Text);
 	}
+	const FString Rule = GameplayConsoleFilter::RuleName(Filter.Rule);
+	const int32 JobId = FGameplayConsoleJobs::Get().Enqueue(command.TrimStartAndEnd(), Segments, Rule, Target);
+
+	TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetNumberField(TEXT("job_id"), JobId);
+	Payload->SetStringField(TEXT("state"), TEXT("queued"));
+	Payload->SetStringField(TEXT("command"), command.TrimStartAndEnd());
+	Payload->SetStringField(TEXT("rule"), Rule);
 	Payload->SetArrayField(TEXT("segments"), GameplayMCP::ToJsonArray(Segments));
-	Payload->SetStringField(TEXT("target"), UsedTarget);
-	Payload->SetStringField(TEXT("output"), GameplayMCP::Truncate(Output.TrimStartAndEnd(), 20000));
-	Payload->SetArrayField(TEXT("log"), GameplayMCP::ToJsonArray(Log));
-	Payload->SetBoolField(TEXT("recognized"), bRecognized);
+	Payload->SetStringField(TEXT("target"), Target);
+	Payload->SetStringField(TEXT("next"), TEXT("The command runs on a later frame. Poll editor_get_command_result with this job_id until state is 'done' (or 'cancelled')."));
 	return GameplayMCP::Ok(Payload);
+}
+
+FGameplayMCPResult UGameplayEditorToolset::editor_get_command_result(const FString& job_id)
+{
+	GAMEPLAYMCP_REQUIRE_GAME_THREAD();
+
+	if (!FGameplayConsoleJobs::Get().HasJobs())
+	{
+		return GameplayMCP::Fail(TEXT("No console command has been queued with editor_run_console_command yet."));
+	}
+	const FString Id = job_id.TrimStartAndEnd();
+	int32 JobId = INDEX_NONE;
+	if (!GameplayMCP::IsUnset(Id) && !Id.Equals(TEXT("latest"), ESearchCase::IgnoreCase))
+	{
+		if (!Id.IsNumeric() || Id.Contains(TEXT(".")))
+		{
+			return GameplayMCP::Fail(FString::Printf(TEXT("'%s' is not a job id. Use a number or 'latest'."), *job_id));
+		}
+		JobId = FCString::Atoi(*Id);
+	}
+	TSharedPtr<FJsonObject> Result = FGameplayConsoleJobs::Get().GetResult(JobId);
+	if (!Result.IsValid())
+	{
+		return GameplayMCP::Fail(FString::Printf(TEXT("No console command job %s. Only the most recent jobs are kept; use 'latest'."), *job_id));
+	}
+	return GameplayMCP::Ok(Result.ToSharedRef());
 }
 
 FGameplayMCPResult UGameplayEditorToolset::editor_get_recent_log(int32 max_lines, const FString& log_category, const FString& min_verbosity, const FString& contains, int32 after_id)

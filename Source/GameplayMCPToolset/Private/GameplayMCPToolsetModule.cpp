@@ -4,6 +4,7 @@
 #include "ToolsetRegistry/UToolsetRegistry.h"
 
 #include "GameplayBlueprintToolset.h"
+#include "GameplayConsoleJobs.h"
 #include "GameplayEditorToolset.h"
 #include "GameplayInputJobs.h"
 #include "GameplayInputToolset.h"
@@ -22,6 +23,7 @@ public:
 	{
 		FGameplayLogCapture::Get().Startup();
 		FGameplayInputJobs::Get().Startup();
+		FGameplayConsoleJobs::Get().Startup();
 		UToolsetRegistry::RegisterToolsetClass(UGameplayPIEToolset::StaticClass());
 		UToolsetRegistry::RegisterToolsetClass(UGameplayInputToolset::StaticClass());
 		UToolsetRegistry::RegisterToolsetClass(UGameplayEditorToolset::StaticClass());
@@ -34,6 +36,7 @@ public:
 		// Tickers, delegates and the log device are released even late in engine shutdown, so nothing
 		// of this module is left registered (or holding memory) when static destructors run.
 		GameplayScreenshots::Shutdown();
+		FGameplayConsoleJobs::Get().Shutdown();
 		GameplayLiveCoding::Shutdown();
 		FGameplayInputJobs::Get().Shutdown();
 		FGameplayLogCapture::Get().Shutdown();

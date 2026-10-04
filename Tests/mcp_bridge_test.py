@@ -128,11 +128,21 @@ try:
     EDITOR = "GameplayMCPToolset.GameplayEditorToolset"
     if EDITOR in listed_text:
         env, raw = call_tool(EDITOR, "editor_run_console_command", command="stat fps")
-        check(env and env.get("success"), "call_tool editor_run_console_command", env or raw)
+        job = env["result"]["job_id"] if check(env and env.get("success") and env["result"]["state"] == "queued", "call_tool editor_run_console_command queues a job", env or raw) else None
+        state = None
+        for _ in range(100 if job else 0):
+            env, raw = call_tool(EDITOR, "editor_get_command_result", job_id=str(job))
+            state = env and env.get("success") and env["result"]["state"]
+            if state in ("done", "cancelled"):
+                break
+            time.sleep(0.1)
+        check(state == "done" and env["result"]["ran_in"] == "pie", "deferred console command done over MCP", env and env.get("result"))
+        env, raw = call_tool(EDITOR, "editor_run_console_command", command="QUIT_EDITOR_TYPO_CHECK", allow_unsafe=True)
+        check(env and env.get("success") is False and "hard_deny" in env.get("error", ""), "hard-deny refusal comes through MCP (never executed)", env or raw)
 
     VIEW = "GameplayMCPToolset.GameplayViewportToolset"
     if VIEW in listed_text:
-        env, raw = call_tool(VIEW, "game_capture_screenshot", width=640, height=360, file_name="bridge_shot")
+        env, raw = call_tool(VIEW, "game_capture_screenshot", width=640, height=360, file_name="bridge_shot", overwrite=True)
         job = env["result"]["job_id"] if check(env and env.get("success"), "call_tool game_capture_screenshot", env or raw) else None
         state = None
         for _ in range(100 if job else 0):

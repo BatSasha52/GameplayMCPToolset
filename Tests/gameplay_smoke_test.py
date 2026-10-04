@@ -429,13 +429,27 @@ def test_phase2():
 ED = "GameplayEditorToolset"
 
 
+def run_console(command, target="auto", allow_unsafe=False, label=None):
+    """Queues a command, checks it was not run inside the tool call, waits for the deferred result."""
+    r = ok(ED, "editor_run_console_command", command=command, target=target, allow_unsafe=allow_unsafe)
+    if not r:
+        return None
+    first = call(ED, "editor_get_command_result", job_id=str(r["job_id"])).get("result") or {}
+    check(r["state"] == "queued" and first.get("state") == "queued", "%s: queued, not run inside the tool call" % (label or command), (r["state"], first.get("state")))
+    yield from wait_until(lambda: (call(ED, "editor_get_command_result", job_id=str(r["job_id"])).get("result") or {}).get("state") in ("done", "cancelled"),
+                          30, "console job %s" % command)
+    return call(ED, "editor_get_command_result", job_id=str(r["job_id"])).get("result")
+
+
 def test_phase3_editor():
     if not has_toolset(ED):
         skip("phase 3 (GameplayEditorToolset not registered)")
         return
-    r = ok(ED, "editor_run_console_command", command="r.VSync")
+    expect_fail(ED, "editor_get_command_result", contains="No console command has been queued")
+    r = yield from run_console("r.VSync")
     text = (r or {}).get("output", "") + " ".join(l["message"] for l in (r or {}).get("log", []))
-    check(r and r["target"] == "editor" and "r.VSync" in text and r["recognized"], "console command output captured in editor", r)
+    check(r and r["state"] == "done" and r["ran_in"] == "editor" and "r.VSync" in text and r["recognized"] and r["world_changed"] is False,
+          "deferred command output captured in editor", r)
     # Refusals are checked for the refusal only: none of these is ever executed.
     for denied in ("quit", "EXIT", "QUIT_EDITOR_TYPO_CHECK", "close_editor", "  quit", "stat fps | exit", "stat fps; quit",
                    "obj savepackage /Game/GMCPTest/TestMap", "py print(1)", "debug crash", "disconnect"):
@@ -443,8 +457,10 @@ def test_phase3_editor():
         expect_fail(ED, "editor_run_console_command", contains="rule hard_deny", command=denied, allow_unsafe=True)
     expect_fail(ED, "editor_run_console_command", contains="rule allowlist_miss", command="gmcp_not_a_command_xyz")
     expect_fail(ED, "editor_run_console_command", contains="allow_unsafe=true", command="transaction undo")
-    r = ok(ED, "editor_run_console_command", command="stat fps; r.VSync", target="editor")
-    check(r and r["rule"] == "allowed" and r["segments"] == ["stat fps", "r.VSync"], "chain split into checked segments", r and (r["rule"], r["segments"]))
+    r = yield from run_console("stat fps; r.VSync", target="editor")
+    check(r and r["state"] == "done" and r["rule"] == "allowed" and r["segments"] == ["stat fps", "r.VSync"], "chain split into checked segments and run", r and (r["rule"], r["segments"]))
+    expect_fail(ED, "editor_get_command_result", contains="No console command job", job_id="9999")
+    expect_fail(ED, "editor_get_command_result", contains="not a job id", job_id="abc")
     expect_fail(ED, "editor_run_console_command", contains="No Play-In-Editor session", command="stat fps", target="pie")
     expect_fail(ED, "editor_run_console_command", contains="target must be", command="stat fps", target="server")
 
@@ -467,13 +483,14 @@ def test_phase3_editor():
 def test_phase3_pie():
     if not has_toolset(ED):
         return
-    r = ok(ED, "editor_run_console_command", command="slomo 0.5")
-    check(r and r["target"] == "pie", "auto target uses PIE while it runs", r)
+    r = yield from run_console("slomo 0.5")
+    check(r and r["ran_in"] == "pie", "auto target uses PIE while it runs", r and r["ran_in"])
     check(prop("TimeDilation", actor="WorldSettings") == 0.5, "slomo changed the PIE world's time dilation", prop("TimeDilation", actor="WorldSettings"))
-    ok(ED, "editor_run_console_command", command="slomo 1", target="pie")
+    check(r and r["world_changed"] and any(c.startswith("time_dilation") for c in r["changes"]), "result reports the world change", r and r.get("changes"))
+    r = yield from run_console("slomo 1", target="pie")
     check(prop("TimeDilation", actor="WorldSettings") == 1, "slomo restored", prop("TimeDilation", actor="WorldSettings"))
-    r = ok(ED, "editor_run_console_command", command="r.VSync", target="editor")
-    check(r and r["target"] == "editor", "explicit editor target during PIE", r and r["target"])
+    r = yield from run_console("r.VSync", target="editor")
+    check(r and r["ran_in"] == "editor", "explicit editor target during PIE", r and r["ran_in"])
 
 
 def test_live_coding():
@@ -583,7 +600,8 @@ def test_phase4():
     # Every edit is one undoable transaction.
     ok(BPT, "bp_add_component", blueprint_path=A, component_class="StaticMeshComponent", name="Temp")
     if has_toolset(ED):
-        ok(ED, "editor_run_console_command", command="TRANSACTION UNDO", target="editor", allow_unsafe=True)
+        r = yield from run_console("TRANSACTION UNDO", target="editor", allow_unsafe=True)
+        check(r and r["rule"] == "allowed_unsafe" and r["state"] == "done", "allow_unsafe runs a non-allowlisted command", r and (r["rule"], r["state"]))
         check("Temp" not in components(A), "undo removes the added component", sorted(components(A)))
     else:
         call(BPT, "bp_remove_component", blueprint_path=A, name="Temp")
@@ -703,7 +721,7 @@ def sequence():
     yield
 
     test_phase1_before_pie()
-    test_phase3_editor()
+    yield from test_phase3_editor()
     test_phase5_before_pie()
     ok("GameplayPIEToolset", "pie_start")
     if not (yield from wait_until(pie_running, 90, "PIE to start")):
@@ -715,7 +733,7 @@ def sequence():
     test_anim_state("Idle", "anim state at rest")
     test_montage()
     yield from test_phase2()
-    test_phase3_pie()
+    yield from test_phase3_pie()
     yield from test_phase5_in_pie()
 
     yield from bridge_wait()
@@ -726,15 +744,23 @@ def sequence():
         r = ok(INP, "input_hold_action", action="IA_Move", value="0,1", duration=60)
         held_job = r and r["job_id"]
         yield from wait_seconds(0.3)
+    pending = None
+    if has_toolset(ED):
+        r = ok(ED, "editor_run_console_command", command="stat unit", target="pie")
+        pending = r and r["job_id"]
     ok("GameplayPIEToolset", "pie_stop")
     yield from wait_until(lambda: not pie_running(), 60, "PIE to stop")
+    if pending:
+        yield from wait_until(lambda: (call(ED, "editor_get_command_result", job_id=str(pending)).get("result") or {}).get("state") in ("done", "cancelled"), 30, "pending PIE command")
+        st = call(ED, "editor_get_command_result", job_id=str(pending)).get("result") or {}
+        check(st.get("state") == "cancelled" and "PIE session ended" in st.get("error", ""), "queued PIE command cancelled when PIE ends", st)
     expect_fail("GameplayPIEToolset", "pie_get_property", contains="No Play-In-Editor session", actor="@pawn", property_path="Health")
     if held_job:
         st = job_state(held_job)
         check(st and st["state"] == "cancelled" and "PIE session ended" in st["error"] and st["held"] == [], "PIE end cancels and releases input jobs", st)
         expect_fail(INP, "input_tap_action", contains="No Play-In-Editor session", action="IA_Jump")
 
-    test_phase4()
+    yield from test_phase4()
     yield from test_live_coding()
 
 

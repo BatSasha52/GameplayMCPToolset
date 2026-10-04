@@ -18,7 +18,8 @@ namespace GameplayLiveCoding
 /**
  * Phase 3 - console commands, the output log and Live Coding.
  * editor_run_console_command only runs known-safe commands (an allowlist) unless allow_unsafe=true, and never runs commands that
- * quit, close or crash the editor, end PIE, run scripts or save packages, even with allow_unsafe.
+ * quit, close or crash the editor, end PIE, run scripts or save packages, even with allow_unsafe. Commands are queued and run on a
+ * later frame, after the tool call has returned; poll editor_get_command_result for the output.
  * editor_live_coding_compile starts a Live Coding compile without blocking the game thread and returns a job id; poll editor_live_coding_status.
  * Every tool returns {Success, Result, Error}.
  */
@@ -29,17 +30,25 @@ class UGameplayEditorToolset : public UToolsetDefinition
 
 public:
 	/**
-	 * Runs a console command and returns its output and the log lines it produced. Chains separated by '|', ';' or newlines are split and every part is checked and run on its own.
+	 * Checks a console command and queues it; returns a job id at once. The command runs on a later frame, after this call has returned (so nothing it does can tear down state under the call). Poll editor_get_command_result for its output, captured log lines and whether the PIE/editor world changed. Chains separated by '|', ';' or newlines are split and every part is checked and run on its own.
 	 * Allowed without allow_unsafe: stat, slomo, showdebug, show, viewmode, display, displayall, pause, freezerendering, god, fly, ghost, walk, toggledebugcamera, restartlevel, obj list, obj dump, and reading or setting console variables (e.g. 'r.VSync', 't.MaxFPS 60').
 	 * Always refused (even with allow_unsafe), matched as prefixes like the engine does: quit, exit, quit_editor, close_editor, close_slate_mainframe, debug, crash, gpf, fatal, terminate, abort, stackoverflow, shutdown, disconnect, exec, py, python, obj savepackage, and any word containing quit, exit, crash, terminate or shutdown.
 	 * Console commands can still change editor or game state; prefer the dedicated tools (pie_stop, bp_*, pie_set_property) where they exist.
 	 * @param command The console command, e.g. 'stat fps', 'slomo 0.5', 'r.ScreenPercentage 50', 'showdebug animation'.
 	 * @param target 'auto' = the PIE session's first local player if PIE is running (so cheats and game commands work), otherwise the editor. 'pie' = require PIE. 'editor' = always run in the editor world.
 	 * @param allow_unsafe Also run commands that are not on the allowlist (e.g. 'transaction undo'). Only set this when you know exactly what the command does. The always-refused list still applies.
-	 * @return Result: {command, rule, segments, target, output, log: [{id, category, verbosity, message}], recognized}. Some commands only take effect on the next frame.
+	 * @return Result: {job_id, state: 'queued', command, rule ('allowed' or 'allowed_unsafe'), segments, target}. Refused commands fail with the rule that matched ('hard_deny' or 'allowlist_miss').
 	 */
 	UFUNCTION(Category = "GameplayMCP|Editor", meta = (AICallable))
 	static FGameplayMCPResult editor_run_console_command(const FString& command, const FString& target = TEXT("auto"), bool allow_unsafe = false);
+
+	/**
+	 * Returns the result of a command queued with editor_run_console_command.
+	 * @param job_id A job id or 'latest'.
+	 * @return Result: {job_id, state ('queued', 'running', 'done' or 'cancelled'), command, rule, segments, target, ran_in ('pie'/'editor'), output, log: [{category, verbosity, message}] (everything logged while it ran and during the next frame), recognized, world_changed, changes, before, after, error}. before/after: {pie_running, pie_world, paused, time_dilation, editor_world}.
+	 */
+	UFUNCTION(Category = "GameplayMCP|Editor", meta = (AICallable))
+	static FGameplayMCPResult editor_get_command_result(const FString& job_id = TEXT("latest"));
 
 	/**
 	 * Returns the most recent output-log lines, filtered. Only lines logged after this plugin loaded are available (up to the last 10000).
