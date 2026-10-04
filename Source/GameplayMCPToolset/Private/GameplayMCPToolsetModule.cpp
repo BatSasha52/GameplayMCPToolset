@@ -3,6 +3,8 @@
 #include "Modules/ModuleManager.h"
 #include "ToolsetRegistry/UToolsetRegistry.h"
 
+#include "GameplayInputJobs.h"
+#include "GameplayInputToolset.h"
 #include "GameplayPIEToolset.h"
 
 /**
@@ -14,7 +16,9 @@ class FGameplayMCPToolsetModule : public IModuleInterface
 public:
 	virtual void StartupModule() override
 	{
+		FGameplayInputJobs::Get().Startup();
 		UToolsetRegistry::RegisterToolsetClass(UGameplayPIEToolset::StaticClass());
+		UToolsetRegistry::RegisterToolsetClass(UGameplayInputToolset::StaticClass());
 	}
 
 	virtual void ShutdownModule() override
@@ -23,6 +27,8 @@ public:
 		{
 			return;
 		}
+		FGameplayInputJobs::Get().Shutdown();
+		UToolsetRegistry::UnregisterToolsetClass(UGameplayInputToolset::StaticClass());
 		UToolsetRegistry::UnregisterToolsetClass(UGameplayPIEToolset::StaticClass());
 	}
 };

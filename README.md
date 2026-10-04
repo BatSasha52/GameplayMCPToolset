@@ -1,6 +1,6 @@
 # GameplayMCPToolset
 
-An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, and read animation state.
+An editor-only Unreal Engine plugin that lets an AI assistant **verify gameplay itself** over MCP (Model Context Protocol) instead of handing features back untested. It can inspect a running Play-In-Editor (PIE) session, read and poke live actors, call functions, read animation state, and drive Enhanced Input like a player would.
 
 It works with any project. Nothing in it is tied to a specific game, character or asset.
 
@@ -76,6 +76,31 @@ Toolsets appear to MCP clients as `GameplayMCPToolset.<Toolset>`. Every paramete
 | `pie_get_anim_state(actor, component="*", include_variables=true, include_curves=true)` | Active state + time in state for every state machine, playing montages (section, position, play rate, weight), curve values, and the anim Blueprint's own variables. |
 | `pie_get_component_tree(actor)` | Scene component hierarchy with relative and world transforms, plus non-scene components. |
 
+### Phase 2 — Input simulation (`GameplayInputToolset`)
+
+Input is injected through the local player's `UEnhancedInputLocalPlayerSubsystem` (`Start/Update/StopContinuousInputInjectionForAction`), the clean injection route Enhanced Input provides in 5.8. The action's own modifiers and triggers run exactly as for a real key, gameplay bindings fire normally, and no mapping context or UI automation is involved.
+
+Every input tool **returns a `job_id` at once**; the job then runs on the editor's core ticker over the following frames. Poll `input_status` until `state` is `completed` before checking the result in game. Durations are **game seconds** (they respect pause and time dilation). Every press and every release lasts at least one frame, so triggers always see both edges. One job at a time may drive a given action for a given player. Cancelling a job, or PIE ending, releases everything it holds.
+
+| Tool | Purpose |
+|---|---|
+| `input_list_actions(name_filter="*")` | Input Action assets with their value types (`boolean`, `axis1d`, `axis2d`, `axis3d`). |
+| `input_hold_action(action, duration=1.0, value="1", player_index=0)` | Hold an action, then release. Values: `1`, `0.5`, `0,1`, `0,0,1`, `(X=0,Y=1)`, `[0,1]`. |
+| `input_tap_action(action, count=1, interval=0.1, hold_time=0.05, player_index=0)` | Tap N times: press for `hold_time`, release, wait `interval`, repeat. |
+| `input_set_axis(action, value, end_value="none", duration=1.0, player_index=0)` | Drive a 1D/2D/3D action with a constant value or a linear ramp to `end_value`, then release. |
+| `input_sequence(steps, player_index=0)` | One job from a JSON array of `hold` / `tap` / `axis` / `wait` steps. `"wait": false` on a step starts the next one immediately, so steps can overlap (move while jumping). |
+| `input_status(job_id="*")` | State, elapsed vs expected time, actions held, and a timeline of every press and release. `latest` = newest job. |
+| `input_cancel(job_id="*")` | Cancel one job or all and release their actions. |
+
+`input_sequence` example:
+
+```json
+[ { "type": "hold", "action": "IA_Move", "value": "0,1", "duration": 1.5, "wait": false },
+  { "type": "wait", "duration": 0.5 },
+  { "type": "tap",  "action": "IA_Jump", "count": 2, "interval": 0.2 },
+  { "type": "axis", "action": "IA_Look", "value": "0,0", "end_value": "1,0", "duration": 0.5 } ]
+```
+
 ## Calling tools through Unreal MCP
 
 With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees three meta-tools: `list_toolsets`, `describe_toolset` and `call_tool`. Call a tool like this:
@@ -90,6 +115,9 @@ With Unreal MCP's default tool search (`bEnableToolSearch`), the client sees thr
 
 **Phase 1 — Play-mode inspector**
 > Start PIE, find my player pawn, and tell me its health, its CharacterMovement max walk speed and which locomotion state its anim Blueprint is in. Then set Health to 10, call `ApplyDamage` with 5 and confirm the pawn reports 5.
+
+**Phase 2 — Input simulation**
+> In PIE, hold `IA_Move` forward for 2 seconds, then double-tap `IA_Jump`. Wait for the input job to finish and tell me how far the pawn moved, whether it left the ground, and which anim state it was in while moving.
 
 ## License
 

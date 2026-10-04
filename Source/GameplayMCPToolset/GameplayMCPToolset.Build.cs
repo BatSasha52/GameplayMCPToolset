@@ -25,6 +25,7 @@ public class GameplayMCPToolset : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"AssetRegistry",
 				"EnhancedInput",
 				"LevelEditor",
 				"Slate",

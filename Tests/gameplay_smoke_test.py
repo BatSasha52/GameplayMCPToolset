@@ -312,6 +312,118 @@ def test_montage():
     expect_fail("GameplayPIEToolset", "pie_get_anim_state", contains="not a skeletal mesh", actor="@pawn", component="CollisionCylinder")
 
 
+# ---- phase 2: input simulation ----------------------------------------------------------------
+
+INP = "GameplayInputToolset"
+
+
+def job_state(job_id):
+    env = call(INP, "input_status", job_id=str(job_id))
+    return env["result"]["jobs"][0] if env.get("success") and env["result"]["jobs"] else None
+
+
+def wait_job(job_id, timeout=30):
+    yield from wait_until(lambda: (job_state(job_id) or {}).get("state") in ("completed", "cancelled", "failed"), timeout, "input job %s" % job_id)
+    return job_state(job_id)
+
+
+def pawn_location():
+    env = call("GameplayPIEToolset", "pie_find_actor", actor="@pawn")
+    return env["result"]["location"] if env.get("success") else None
+
+
+def reset_counters():
+    call("GameplayPIEToolset", "pie_call_function", actor="@pawn", function_name="ResetInputCounters")
+
+
+def test_phase2():
+    if not has_toolset(INP):
+        skip("phase 2 (GameplayInputToolset not registered)")
+        return
+    r = ok(INP, "input_list_actions", name_filter="IA_*")
+    types = {a["name"]: a["value_type"] for a in (r["actions"] if r else [])}
+    check(types == {"IA_Jump": "boolean", "IA_Move": "axis2d", "IA_Throttle": "axis1d"}, "input_list_actions with value types", types)
+
+    expect_fail(INP, "input_hold_action", contains="No Input Action named", action="IA_Nope")
+    expect_fail(INP, "input_hold_action", contains="does not fit", action="IA_Move", value="1,2,3")
+    expect_fail(INP, "input_hold_action", contains="not a number", action="IA_Move", value="1,up")
+    expect_fail(INP, "input_hold_action", contains="Local player 3", action="IA_Jump", player_index=3)
+    expect_fail(INP, "input_set_axis", contains="Boolean action", action="IA_Jump", value="1")
+    expect_fail(INP, "input_tap_action", contains="count must be", action="IA_Jump", count=0)
+    expect_fail(INP, "input_sequence", contains="JSON array", steps="{not json")
+    expect_fail(INP, "input_sequence", contains="unknown field", steps='[{"type":"hold","action":"IA_Jump","duration":1,"speed":2}]')
+    expect_fail(INP, "input_sequence", contains='needs "duration"', steps='[{"type":"wait"}]')
+    expect_fail(INP, "input_sequence", contains="only apply to tap", steps='[{"type":"hold","action":"IA_Jump","duration":1,"count":2}]')
+    expect_fail(INP, "input_status", contains="No input job", job_id="9999")
+    expect_fail(INP, "input_status", contains="not a job id", job_id="abc")
+
+    # Hold Move forward: the pawn walks, the anim Blueprint switches to Walk, then back to Idle.
+    reset_counters()
+    start = pawn_location()
+    r = ok(INP, "input_hold_action", action="IA_Move", value="0,1", duration=2.0)
+    job = r and r["job_id"]
+    check(r and r["state"] == "queued" and abs(r["expected_seconds"] - 2.0) < 0.01, "hold returns a job id at once", r)
+    yield from wait_seconds(1.0)
+    st = job_state(job)
+    check(st and st["state"] == "running" and st["held"] == ["IA_Move"], "job running and holding mid-way", st)
+    test_anim_state("Walk", "anim state while move is held")
+    expect_fail(INP, "input_hold_action", contains="already being driven", action="IA_Move", duration=0.5)
+    st = yield from wait_job(job)
+    check(st and st["state"] == "completed" and st["held"] == [] and 1.9 <= st["elapsed_seconds"] <= 2.3, "hold completed after ~2s", st)
+    end = pawn_location()
+    check(start and end and end["x"] - start["x"] > 150, "pawn moved forward", (start, end))
+    check(prop("LastMoveInput") == {"x": 0, "y": 1} and prop("MoveTriggeredFrames") >= 20 and prop("MoveCompletedCount") == 1,
+          "Enhanced Input delivered the held value and one release", (prop("LastMoveInput"), prop("MoveTriggeredFrames"), prop("MoveCompletedCount")))
+    yield from wait_seconds(1.0)
+    test_anim_state("Idle", "anim state after release")
+
+    # Taps: three separate presses and releases.
+    r = ok(INP, "input_tap_action", action="IA_Jump", count=3, interval=0.3, hold_time=0.05)
+    st = yield from wait_job(r and r["job_id"])
+    presses = [e for e in (st or {}).get("events", []) if "press IA_Jump" in e]
+    check(st and st["state"] == "completed" and len(presses) == 3, "tap job completed with 3 presses", st and st["events"])
+    check(prop("JumpPressCount") == 3 and prop("JumpReleaseCount") == 3, "game saw 3 jump presses and releases", (prop("JumpPressCount"), prop("JumpReleaseCount")))
+
+    # Axis: constant, then ramp.
+    r = ok(INP, "input_set_axis", action="IA_Throttle", value="0.5", duration=0.3)
+    yield from wait_job(r and r["job_id"])
+    check(abs((prop("LastThrottle") or 0) - 0.5) < 1e-4, "constant axis value delivered", prop("LastThrottle"))
+    reset_counters()
+    r = ok(INP, "input_set_axis", action="IA_Throttle", value="0", end_value="1", duration=1.0)
+    yield from wait_seconds(0.5)
+    mid = prop("LastThrottle")
+    st = yield from wait_job(r and r["job_id"])
+    check(st and st["state"] == "completed" and mid is not None and 0.2 < mid < 0.8 and prop("MaxThrottle") > 0.9,
+          "ramp goes from 0 to 1 over the duration", (mid, prop("MaxThrottle")))
+
+    # Sequence with an overlapping step: move while jumping.
+    reset_counters()
+    steps = [{"type": "hold", "action": "IA_Move", "value": [0, 1], "duration": 1.0, "wait": False},
+             {"type": "wait", "duration": 0.3},
+             {"type": "tap", "action": "IA_Jump"},
+             {"type": "axis", "action": "IA_Throttle", "value": 0.25, "duration": 0.2}]
+    r = ok(INP, "input_sequence", steps=json.dumps(steps))
+    check(r and r["step_count"] == 4 and abs(r["expected_seconds"] - 1.0) < 0.01, "sequence accepted", r)
+    st = yield from wait_job(r and r["job_id"])
+    ev = (st or {}).get("events", [])
+    idx = lambda key: next((i for i, e in enumerate(ev) if key in e), -1)
+    check(st and st["state"] == "completed" and 0 <= idx("press IA_Jump") < idx("release IA_Move"), "sequence ran steps overlapped", ev)
+    check(prop("JumpPressCount") == 1 and prop("MoveCompletedCount") == 1 and abs(prop("LastThrottle") - 0.25) < 1e-4, "sequence effects seen in game",
+          (prop("JumpPressCount"), prop("MoveCompletedCount"), prop("LastThrottle")))
+
+    # Cancel releases held input at once.
+    reset_counters()
+    r = ok(INP, "input_hold_action", action="IA_Move", value="1,0", duration=20)
+    yield from wait_seconds(0.3)
+    c = ok(INP, "input_cancel", job_id=str(r and r["job_id"]))
+    yield from wait_seconds(0.2)
+    st = job_state(r and r["job_id"])
+    check(c and c["cancelled"] == 1 and st["state"] == "cancelled" and st["held"] == [], "cancel stops the job", st)
+    check(prop("MoveCompletedCount") == 1, "cancel released the action in game", prop("MoveCompletedCount"))
+    r = ok(INP, "input_status", job_id="*")
+    check(r and len(r["jobs"]) >= 6, "input_status lists retained jobs", r and len(r["jobs"]))
+
+
 def bridge_wait():
     if os.environ.get("GMCP_MCP_BRIDGE") != "1":
         skip("MCP bridge test (set GMCP_MCP_BRIDGE=1 and run Tests/mcp_bridge_test.py)")
@@ -346,12 +458,23 @@ def sequence():
     test_phase1_in_pie()
     test_anim_state("Idle", "anim state at rest")
     test_montage()
+    yield from test_phase2()
 
     yield from bridge_wait()
 
+    # A job still holding input when PIE ends must be cancelled and released.
+    held_job = None
+    if has_toolset(INP):
+        r = ok(INP, "input_hold_action", action="IA_Move", value="0,1", duration=60)
+        held_job = r and r["job_id"]
+        yield from wait_seconds(0.3)
     ok("GameplayPIEToolset", "pie_stop")
     yield from wait_until(lambda: not pie_running(), 60, "PIE to stop")
     expect_fail("GameplayPIEToolset", "pie_get_property", contains="No Play-In-Editor session", actor="@pawn", property_path="Health")
+    if held_job:
+        st = job_state(held_job)
+        check(st and st["state"] == "cancelled" and "PIE session ended" in st["error"] and st["held"] == [], "PIE end cancels and releases input jobs", st)
+        expect_fail(INP, "input_tap_action", contains="No Play-In-Editor session", action="IA_Jump")
 
 
 def run():
